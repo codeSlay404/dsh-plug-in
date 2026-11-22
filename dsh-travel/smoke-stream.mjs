@@ -115,7 +115,7 @@ const fakeCtx = {
     },
   },
 }
-apply(fakeCtx)
+apply(fakeCtx, fakeCtx.config)
 const handler = fakeCtx._handler
 
 async function call(body) {

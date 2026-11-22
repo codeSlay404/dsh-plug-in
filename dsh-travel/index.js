@@ -135,14 +135,16 @@ export function toDest(raw, i, season, months) {
 
 /* ---------------- apply ---------------- */
 
-export function apply(ctx) {
+export function apply(ctx, config) {
   if (!ctx) return // 离线冒烟只 import 纯函数
   const llm = ctx.llm
   const adm = ctx.agentDefaultModel
   const guardOpts = guardOptions(ctx)
-  // 超时可注入：线上默认 90s，冒烟用 ctx.config.timeoutMs / TRAVEL_TIMEOUT_MS 缩短。
-  const timeoutMs = Number(ctx?.config?.timeoutMs) > 0
-    ? Number(ctx.config.timeoutMs)
+  // 超时可注入：线上默认 90s，冒烟用 config.timeoutMs / TRAVEL_TIMEOUT_MS 缩短。
+  // 注意必须用 apply 的第二参（插件 Config），不能读 ctx.config —— 'config' 不在 inject 里，
+  // Cordis 会在取属性时直接抛 "cannot get property config without inject"，整个插件 entry 变 failed。
+  const timeoutMs = Number(config?.timeoutMs) > 0
+    ? Number(config.timeoutMs)
     : Number(process.env.TRAVEL_TIMEOUT_MS) > 0 ? Number(process.env.TRAVEL_TIMEOUT_MS) : TIMEOUT_MS
 
   ctx.effect(() => {

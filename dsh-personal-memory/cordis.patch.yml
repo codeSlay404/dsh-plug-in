@@ -1,0 +1,41 @@
+# dsh-personal-memory bundle patch：在 host 平面挂一行，监听 agent/pre-step。
+#
+# `name` 是包名（单入口，无子路径）。行 id `personal-memory` 就是它。
+# 想临时关掉而不卸载，在 profile 自己的 cordis.patch.yml 里按 id 覆盖：
+#
+#   - id: personal-memory
+#     disabled: true
+#
+# 检索走本地常驻服务 ctx-server（launchd com.mars.ctx-server，127.0.0.1:17878），
+# 它包装 contextdb，索引库在 ~/.dsh/contextdb/ctx.db。不再依赖 dsh-knowledge。
+# baseId/mode 保留给面板兼容显示，实际检索由 ctx-server 决定。
+
+- insert:
+    - id: personal-memory
+      name: dsh-personal-memory
+      config:
+        enabled: true
+        baseId: 'contextdb:~/.dsh/contextdb/ctx.db'
+        topK: 4
+        # 本地服务固定向量检索；此字段仅面板展示
+        mode: vector
+        threshold: 0.12
+        excerptChars: 260
+        semanticSnippetRatio: 0.55
+        maxChars: 1600
+        minQueryChars: 6
+        maxQueryChars: 300
+        timeoutMs: 2500
+        perSessionDocLimit: 12
+        log: true
+        # ---- 面板相关 ----
+        # 面板里「检索」页每次取回的条数
+        panelTopK: 12
+        # 目录扫描缓存毫秒数（面板点刷新会强制 rescan）
+        cacheMs: 2000
+        # 工作区根目录；留空则自动从 workingDirectory / cwd 向上找同时含 personal/ 与 memory/ 的目录
+        workspace: ''
+        # 面板里的「速记」按钮（只追加到当天日记）
+        quickNote: true
+        # 速记落盘后自动重建 contextdb 索引
+        autoReindex: true

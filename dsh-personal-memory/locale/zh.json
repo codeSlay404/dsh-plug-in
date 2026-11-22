@@ -1,0 +1,25 @@
+{
+  "meta": {
+    "title": "个人记忆",
+    "description": "个人记忆面板：今天要做什么、懂过什么（personal）、走过哪些日子（memory）—— 能读、能搜、能改。"
+  },
+  "config": {
+    "enabled": "召回总开关",
+    "baseId": "要检索的知识库；留空表示查所有库",
+    "topK": "一次注入几条",
+    "mode": "检索模式：hybrid / vector / lexical",
+    "threshold": "低于这个分数的命中丢弃",
+    "excerptChars": "每条笔记保留多少字",
+    "maxChars": "单次注入的总字数上限",
+    "minQueryChars": "提问短于这个长度就不查",
+    "maxQueryChars": "送去检索的提问最多截多少字",
+    "timeoutMs": "检索超时（毫秒）",
+    "perSessionDocLimit": "一次会话最多注入多少份笔记",
+    "log": "是否写调试日志到 ~/.dsh/logs/personal-memory.jsonl",
+    "panelTopK": "面板「检索」页每次取回几条",
+    "cacheMs": "目录扫描缓存毫秒数",
+    "workspace": "工作区根目录；留空则自动查找含 personal/ 与 memory/ 的目录",
+    "quickNote": "开启面板里的「速记」（只追加到当天日记）",
+    "autoReindex": "速记落盘后自动重建索引"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "meta": {
+    "title": "Travel seasons",
+    "description": "A full-page panel in the sidebar: pick a season (or just open it — it starts on the current season) and browse where to go and, more importantly, the best things to do there — experiences, food and practical tips, not just scenic spots. Filter by experience kind, search keywords, roll the dice for a random pick, and star destinations you want to go (saved locally in your browser). All data is built in; the panel makes no network requests.",
+    "detail": "docs/DETAIL.md"
+  },
+  "nav": "Travel",
+  "brand.sub": "Where to go this season, and what to do there",
+  "tab.now": "Now",
+  "tab.spring": "Spring",
+  "tab.summer": "Summer",
+  "tab.autumn": "Autumn",
+  "tab.winter": "Winter",
+  "tab.wish": "Wishlist ({n})",
+  "search.ph": "Search a place, an activity, a food…",
+  "month.all": "Whole season",
+  "count": "{n} destinations",
+  "sort.hint": "best-fit first",
+  "badge.best": "In season",
+  "wish.add": "Add to wishlist",
+  "wish.remove": "Remove from wishlist",
+  "wish.empty.title": "No wishlist yet",
+  "wish.empty.hint": "Tap the star on any destination card — it lands here.",
+  "drawer.exps": "Things to do",
+  "drawer.food": "What to eat",
+  "drawer.tips": "Know before you go",
+  "random": "Surprise me",
+  "random.pick": "Rolling: {name}",
+  "empty.title": "Nothing matched",
+  "empty.hint": "Try another keyword, month or filter chip.",
+  "all.season": "All",
+  "months": "Best: {m}"
+}

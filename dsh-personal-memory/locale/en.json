@@ -1,0 +1,25 @@
+{
+  "meta": {
+    "title": "Personal Memory",
+    "description": "Personal Memory panel: today, what you know (personal), and the days you lived (memory) — read, search, edit."
+  },
+  "config": {
+    "enabled": "Turn recall on or off",
+    "baseId": "Knowledge base to search; empty means every base",
+    "topK": "How many notes to inject",
+    "mode": "Retrieval mode: hybrid, vector or lexical",
+    "threshold": "Drop hits scoring below this",
+    "excerptChars": "Characters kept from each note",
+    "maxChars": "Total characters per injection",
+    "minQueryChars": "Skip prompts shorter than this",
+    "maxQueryChars": "Longest prompt prefix sent to retrieval",
+    "timeoutMs": "Retrieval timeout in milliseconds",
+    "perSessionDocLimit": "Most notes injected in one session",
+    "log": "Write debug lines to ~/.dsh/logs/personal-memory.jsonl",
+    "panelTopK": "Hits per search in the panel",
+    "cacheMs": "Directory scan cache in milliseconds",
+    "workspace": "Workspace root; empty means auto-detect the folder with personal/ and memory/",
+    "quickNote": "Enable the quick-note button (appends to today's diary)",
+    "autoReindex": "Rebuild the index after a quick note"
+  }
+}

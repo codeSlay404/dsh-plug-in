@@ -1,0 +1,14 @@
+# dsh-travel bundle patch:在 host 平面挂一行,让 client 半的 Web 面板生效。
+#
+# 行 id `travel` 就是插件行 id。想临时关掉而不卸载,在 profile 自己的
+# cordis.patch.yml 里按 id 覆盖:
+#
+#   - id: travel
+#     disabled: true
+#
+# 面板数据全部内置在 client.js 里,不需要 host 路由、外部 API 或任何配置。
+
+- insert:
+    - id: travel
+      name: dsh-travel
+      config: {}

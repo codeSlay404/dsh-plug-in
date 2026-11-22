@@ -1,0 +1,61 @@
+{
+  "name": "dsh-personal-memory",
+  "version": "1.1.0",
+  "private": true,
+  "description": "个人记忆面板：personal 认知 + memory 时间长河，可浏览、检索、速记、勾待办、编辑新建、星标与最近查过",
+  "type": "module",
+  "main": "index.js",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./icon": "./icon.svg",
+    "./locale/en.json": "./locale/en.json",
+    "./locale/zh.json": "./locale/zh.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "guard.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-bundle",
+    "dsh-plugin",
+    "journal",
+    "kb-audit",
+    "knowledge-base",
+    "memory",
+    "note-health",
+    "panel",
+    "personal-memory",
+    "rag",
+    "recall"
+  ],
+  "license": "MIT"
+}

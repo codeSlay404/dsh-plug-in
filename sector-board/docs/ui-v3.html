@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>股票分析 · 今日信号</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="assets/ui-v3.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="top-in">
+      <div class="brand">
+        <span class="mark">A</span>
+        <div>
+          <b>股票分析</b>
+          <span>A-SHARE SIGNALS</span>
+        </div>
+      </div>
+      <nav class="nav" aria-label="主导航">
+        <button data-tab="today" class="active">今日</button>
+        <button data-tab="sectors">板块</button>
+        <button data-tab="live" class="live-nav"><i></i>盘中</button>
+        <button data-tab="paper">模拟盘</button>
+        <button data-tab="more">更多</button>
+        <button data-tab="learn">学习</button>
+      </nav>
+      <div class="top-actions">
+        <div class="search" id="search">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <input id="q" type="text" placeholder="搜索股票 / ETF" autocomplete="off" spellcheck="false" aria-label="搜索股票">
+          <kbd>⌘K</kbd>
+          <div class="sugg" id="sugg"></div>
+        </div>
+        <button class="icon-btn" id="themeBtn" title="切换明暗主题" aria-label="切换明暗主题">◐</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="ribbon"><div class="ribbon-in" id="ribbon"></div></div>
+
+  <main>
+    <section class="page" id="page-today"></section>
+    <section class="page" id="page-sectors" hidden></section>
+    <section class="page" id="page-live" hidden></section>
+    <section class="page" id="page-paper" hidden></section>
+    <section class="page" id="page-more" hidden></section>
+    <section class="page" id="page-learn" hidden></section>
+  </main>
+
+  <footer class="foot">
+    <span>股票分析 · 全市场行情 15 秒 · 技术指标/周期每日 · 模拟盘净值 10 秒</span>
+    <span id="footNote">正在读取 Host 数据…</span>
+  </footer>
+
+  <div class="boot" id="boot">
+    <div class="boot-card">
+      <span class="boot-spin"></span>
+      <b id="bootTitle">正在读取真实数据</b>
+      <p id="bootText">连接 Host 数据接口…</p>
+      <button class="btn primary" id="bootRetry" hidden>重试</button>
+    </div>
+  </div>
+
+  <div class="mask" id="mask"></div>
+  <aside class="drawer" id="drawer" aria-label="个股技术分析">
+    <div id="drawerContent" style="display:contents"></div>
+  </aside>
+  <div class="toast" id="toast"></div>
+
+  <script src="assets/universe-data.js"></script>
+  <script src="assets/ui-v3.js"></script>
+</body>
+</html>

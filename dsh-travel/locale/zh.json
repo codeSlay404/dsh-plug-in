@@ -1,0 +1,33 @@
+{
+  "meta": {
+    "title": "旅行灵感",
+    "description": "侧栏打开整页面板:默认就是当季,看这个季节该去哪、更重要的是「去那玩什么」——写的是最好玩的事(玩法、吃法、避坑贴士),不只罗列景点。可按玩法标签筛选、关键词搜索、掷骰子随机挑一个,点星标收藏「想去」(存在浏览器本地)。数据全部内置,不发起网络请求。",
+    "detail": "docs/DETAIL.zh.md"
+  },
+  "nav": "旅行灵感",
+  "brand.sub": "每个季节,该去哪、玩什么",
+  "tab.now": "当季",
+  "tab.spring": "春",
+  "tab.summer": "夏",
+  "tab.autumn": "秋",
+  "tab.winter": "冬",
+  "tab.wish": "想去 ({n})",
+  "search.ph": "搜地名、玩法、美食…",
+  "month.all": "整季",
+  "count": "{n} 个目的地",
+  "sort.hint": "正当时的排前",
+  "badge.best": "正当时",
+  "wish.add": "加入想去",
+  "wish.remove": "移出想去",
+  "wish.empty.title": "还没有想去的地方",
+  "wish.empty.hint": "在卡片右上角点一颗星,这里就有了。",
+  "drawer.exps": "最好玩的事",
+  "drawer.food": "必吃",
+  "drawer.tips": "出发前知道",
+  "random": "随机去哪",
+  "random.pick": "摇到了:{name}",
+  "empty.title": "没找到",
+  "empty.hint": "换个关键词、月份或玩法标签试试。",
+  "all.season": "全部",
+  "months": "最佳:{m}"
+}

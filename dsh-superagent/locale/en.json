@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Superagent",
+    "description": "A lead agent in the top-left corner that splits your request into tasks and routes them to workers."
+  }
+}

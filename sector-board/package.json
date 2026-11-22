@@ -1,0 +1,40 @@
+{
+  "name": "@local/sector-board",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "股票分析：A股板块、盘中异动、主题研究与模拟盘",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "opencode_proxy.py",
+    "robot.py",
+    "paper.py",
+    "guard.js",
+    "client.js",
+    "etl.py",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "docs",
+    "announcements.py"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  }
+}

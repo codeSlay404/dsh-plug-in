@@ -29,3 +29,18 @@ coverage/
 __pycache__/
 .venv/
 venv/
+
+# 本机私有文档与截图（不入公开仓）
+**/docs/screenshots/
+dsh-personal-memory/docs/
+sector-board/docs/assets/ui-preview*.png
+sector-board/docs/PRD*.md
+sector-board/docs/learning-plan.md
+sector-board/docs/trading-journal/
+sector-board/docs/ui-v2.html
+sector-board/docs/assets/mock-data-v2.js
+
+# 内部文档（P0 方案、发布方案等，不随开源仓发布）
+p0-fix-plan.md
+open-source-plan.md
+internal/

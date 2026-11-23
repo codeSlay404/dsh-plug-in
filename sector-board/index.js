@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { guardOptions, isTrustedRequest } from './guard.js'
 
-export const name = '@local/sector-board'
+export const name = 'dsh-sector-board'
 export const inject = ['webServer']
 
 const DATA_DIR = process.env.SECTOR_BOARD_DIR || join(homedir(), '.dsh', 'sector-board')

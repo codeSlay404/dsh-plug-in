@@ -15,6 +15,35 @@
                        └──────────────────────────────────────────────┘
 ```
 
+## 点不动的地方，通常是「没有目标」，不是「事件没绑上」
+
+时间长河顶上那排「一年 12 格」，早先对没有记录的月份也渲染成按钮：点下去 `onPickMonth` 拿着 key 去找那个月的标题，找不到就什么都不发生。格子看起来能点、点了没反应，最容易被读成「整个面板坏了」。
+
+现在补成两条：
+
+- **没记录的月份是禁用态**：虚线框、`disabled`、`title` 写「这个月没有记录」，鼠标也不变手型——不能点就别装成能点。
+- **有记录的月份**：`title` 写「点它跳到那个月」，点击时**自己算最近的可滚动祖先**把月份标题挪到列表顶部（`scrollIntoView` 只保证「可见」，在嵌套滚动容器里贴不到顶，点完看不出变化）。
+
+顺带修掉一个把偏好写脏的 bug：`sanitizeUi()` 把 `todoSort`/`searchSort` 赋进了 `collapsed` 那个对象里，于是 `state.json` 的 `ui.collapsed` 长出一堆 `collapsed.todoSort` 这种键；`setPanelUi` 又原样合并回去，越写越脏。排序偏好是 `ui` 的兄弟字段，现在分开存，并加了断言钉住。
+
+## 「为什么有这么多未完成的」
+
+40 条待办不等于 40 件事。真机 40 行里，有 9 行是**同一件事被抄进了不同天的「未完成」**：清源持仓处置 5 条跨 5 天、`watchlist.md` 的 002865 重复 5 条、`ollama` 悬空链接 4 条、观察层 67 行 3 条、钧达持仓 3 条。
+
+面板不替人判断「这件事还在不在」，但可以**把「这是同一件事」标出来**：
+
+- host `/timeline` 每条待办带 `dupKey` / `dupCount` / `dupDates`。聚簇用 IDF 加权的字面重叠（中文 2-gram + 英文/数字词，`score = Σidf(共有) / max(Σidf(A), Σidf(B))`，阈值 `CLUSTER_MIN_SCORE = 0.3`）。
+- 为什么是这个算法：纯交集 0.45 在真机 40 行上一条都合不上（40 簇）；IDF 加权 0.3 得到 31 簇，把上面那几组合上了，同时没有把「清源清仓」和「钧达止损」并成一件。**宁可漏合并，也不要把两件事并成一件。**
+- 口径统一：状态条、列表头、`/status` 三处说同一个数——`未完成 31 件 / 40 条`。`counts.openTodosDistinct` 由 host 用同一套聚簇算出（只对未勾的行），不做第二套规则。
+- client「未完成」页默认**只显示同一件事最近的一条**，计数写成 `31 件（记录 40 条）`，行尾徽标 `重提 N 次`（tooltip 列出那几天）；「展开重复的 9 条」按钮把原始行放回来。
+- 「今天」页同样去重：`今天该做的` 8 条里若 5 条是同一件旧事的不同日期版本，那 8 条等于没给信息。
+
+另一半是**日期已经过去的一次性动作**：`11-16 开盘：钧达 40 下方无条件清`、`11-20 是期指交割日`。这类不是重复，是过期——那天过了，这句话就没有执行对象了，但没人会回头去勾它。
+
+host 的 `todoExpiry(text, todayKey, ownKey)` 认三种日期写法（`YYYY-MM-DD`、`MM-DD`、`M月D日`），并且只算**写下那天之后**的日期——正文里出现更早的日期是回顾（「11-21 遗留」），不是截止，这条限制把误报从 6 条压到 5 条。命中时给待办加 `expired` / `expiredOn` / `expiredDays`。
+
+面板**只标不勾**：行尾 `过期 6 天` 徽标（tooltip 写「这句里写的是 11-16 那天的事」），加一个「过期的 5 条」筛选 chip。「该不该算做完了」由人判断，正则不该替人做决定。
+
 ## 六套自检
 
 | 自检 | 跑的是什么 | 证明什么 |
@@ -26,7 +55,29 @@
 | `node check-props.mjs` | 静态解析 `client.js` | 组件读的 `initialXxx`，`App` 都传了 |
 | `node smoke-live.mjs [端口]` | **打正在运行的宿主** | 代码真的装进去了、路由真的活着、越界真的 403 |
 
+一条命令跑前五套（`package.json` 的 `scripts`）：
+
+```bash
+npm run check        # smoke + client + check-props + panel + render
+npm run check:live -- 61529   # 打活宿主（端口变过很多次，所以不写死）
+```
+
 前五套离线跑（不需要 GUI），最后一套只在 GUI 开着时有意义——它抓的是「本地全绿但没装上」这一类问题，也真的抓到过一次：`/doc` 的越界路径返回 500 而不是 403（本地断言当时写的就是 500，等于把 bug 冻进了测试）。
+
+## 修复索引：坏的那次不是「重来一遍」的问题，是「怎么知道它坏了」
+
+索引（`.dsh/contextdb/ctx.db`）是**派生物**：删掉重建不丢任何笔记。但它被截断过两次（一次是 `malformed`，一次只剩 4096 字节、`PRAGMA journal_mode=WAL` 直接 `disk I/O error`），两次的面板表现都一模一样——检索空、召回统计全 0，而 `sqlite3 ctx.db "PRAGMA integrity_check"` 可能还是 `ok`（坏的是连接，不是文件）。
+
+所以现在 `ctx-server` 有两个入口，面板各给一个按钮：
+
+| 入口 | 什么时候用 | 旧库怎么办 |
+|---|---|---|
+| `POST /reindex` | 平时加完笔记、想立刻能被搜到 | 先改名成 `ctx.db.prev`，新库建好才删；**中途失败会把旧库放回去**（`_rebuild(provider, backup=True)`，已用「模拟建库就挂」验证回滚成功） |
+| `POST /repair` | 库已经读不出来了（`disk I/O error`、只剩几 KB） | 改名成 `ctx.db.broken-<时分秒>` 留证，然后从笔记重建 |
+
+面板「召回」页：`重建索引` 旁边多一个 `修复索引`——它**要先点两次**（第一次只把按钮变成「确认修复」，不可撤销的动作必须先问一遍）。写完笔记自动触发的是 `/reindex`，不是 `/repair`。
+
+那两次坏掉的共同点：都是**面板写笔记 → 自动 reindex** 与别的东西同时碰库的窗口。现在把「换库」改成 rename 而不是 `unlink`，失败路径也有回滚，但根因仍没定论——所以 `smoke-live.mjs` 里钉了两条：`日志有内容时统计不能全 0`（`logLines >= 50` 就必须有 `stats.recalls`）与 `索引文件不是空壳`（`index.bytes > 1MB`）。这两条让「索引坏了」在自检里显形，而不是等用户发现面板空了还说不出为什么。
 
 ## 两个视图，一句话
 
@@ -466,6 +517,16 @@ slots.inject('main', () => slots.register({ name: 'main', key: 'personal-memory'
 
 体检之后我真的按它修了一轮：把 6 篇的元数据统一成 `更新:` / `来源:` 两行、给 `desk/lhb-seats.md` 和 5 篇 `desk/daily-notes` 补上索引引用、删掉一篇面板自己造的测试残留。修完 `/audit` 返回 `counts.total = 0`。
 
+## 脑图（原 dsh-superbrain 并入）
+
+一个插件，一张图。`lib/brain/` 是从 dsh-superbrain 搬进来的脑层（spread/classify/salience/db），改成 personal-memory 的内部模块，库在 `~/.dsh/personal-memory/brain.db`，不再读 `~/.dsh/superbrain/`。
+
+- **节点两类**：`node_kind='note'` 是 `personal/` 与 `memory/` 的小节（node_key = 内容 sha256），`node_kind='episode'` 是会话日志里的一轮（`session/<id> · turn N`，幂等）。默认三类全收，`brain.ingest.sessions=false` 可关掉会话。
+- **边**：同文件相邻、`[[wikilink]]`、同标签、embedding 相似（优先只读读 `ctx.db` 的 512 维向量，没有就退本地字符 bigram）、会话内相邻 turn 与 episode→note 的原文命中。
+- **衰减不同**：笔记半衰期 90 天、永不删除；会话 30 天，只把「被召回过 / 与笔记相连」的进巩固池，`consolidate()` 把它们按共享笔记聚类提炼成 `巩固：<笔记标题>` 的 note 型节点，原 episode 保留但降权。
+- **召回仍只有一块**：`【记忆召回 · 自动】` 那一条，候选是 ctx-server 检索与脑图扩散的融合（`alpha*ctx + beta*brain`，默认 0.7/0.3），会话节点再乘 `episodeWeight=0.6`，按 path 去重后仍是一份列表。
+- **面板**：宿主面板新增「🧠 脑图」页，iframe 加载 `brain/panel/index.html`（自家的 3D 图），顶部可按「全部 / 笔记 / 会话」过滤；实时图拿不到时退回 `demo.json`。
+
 ## HTTP 路由（host 半，挂在当前 DSH Web 服务上）
 
 | 路由 | 说明 |
@@ -487,6 +548,14 @@ slots.inject('main', () => slots.register({ name: 'main', key: 'personal-memory'
 | `POST /personal-memory/star` | 星标/取消：`{path, on}`，只写 state.json，越界路径 403 |
 | `GET /personal-memory/beacon?stage=` | 客户端存活打点（client 半启动时自己上报，写进日志） |
 | `GET /personal-memory/debug/client` | 自省：client 模块图里有没有本插件、rev 是多少 |
+| `GET /personal-memory/brain/health` | 脑库状态：`dbPath`/`nodes`/`synapses`/`counts{notes,episodes,edges}`/`lastIndexAt`/`lastSessionIngestAt`/`alpha`/`beta`/`episodeWeight` |
+| `GET /personal-memory/brain/graph?limit=&kind=` | 脑图的节点与边。`kind=all\|note\|episode\|memory`；`nodes` 带 `nodeKind`（笔记偏亮、会话偏暗）、`source`/`heading`/`label`/`content` |
+| `GET /personal-memory/brain/node?id=` | 单个节点的全文与邻居 |
+| `POST /personal-memory/brain/touch` | 手动点亮节点（写 activation，不注入对话） |
+| `POST /personal-memory/brain/rebuild` | 按笔记重建（`{force:true}` 忽略指纹缓存） |
+| `POST /personal-memory/brain/ingest` | 手动扫一次会话日志 |
+| `POST /personal-memory/brain/consolidate` | 手动跑一次巩固 |
+| `GET /personal-memory/brain/panel/*` | 3D 脑图静态页（`index.html`/`brain.js`/`brain.css`/`demo.json`），越界路径 404 |
 | `GET /personal-memory/audit?scope=personal` | 知识库体检（只读）：缺 `更新:`/`来源:`、没被任何 index 引用的孤儿、index 里的死链、根目录裸文件。返回 `{items:[{level,path,issue,hint}], counts:{p0,p1,p2,total}, notes, topics}` |
 
 ## 配置
@@ -522,10 +591,10 @@ plugin_manager set_plugin { target: "include:personal-memory", enabled: true }
 ```bash
 node smoke.mjs          # 召回：钩子触发、去重、跳过规则（8 项）
 node smoke-client.mjs   # client 半：slot 注册、bundle 形状
-node smoke-panel.mjs    # host 路由：状态/tree/doc/timeline/混合检索/note/todo/save/create/ui/star/visited/audit…、越权与错误码（280 项）
-node smoke-render.mjs   # 渲染：自带极简 hooks 运行时，把每个视图用真实工作区数据真的渲染一遍（293 项）
+node smoke-panel.mjs    # host 路由：状态/tree/doc/timeline/混合检索/note/todo/save/create/ui/star/visited/audit/reindex…、越权与错误码（293 项）
+node smoke-render.mjs   # 渲染：自带极简 hooks 运行时，把每个视图用真实工作区数据真的渲染一遍（309 项）
 node check-props.mjs    # 静态自检：子组件读的 `initialXxx`，App 有没有真的转发下去（12 组件）
-node smoke-live.mjs 57863   # 打活宿主：12 条只读路由 + 越界/坏输入必须是 403/404（24 项）
+node smoke-live.mjs 61529   # 打活宿主：12 条只读路由 + 越界/坏输入必须是 403/404（26 项）
 ```
 
 `smoke-live.mjs` 证明的是另一件事：**代码真的装进去了**。本地全绿但宿主还在跑旧模块，这种「测试通过、用户看不见」的情况它抓过：`/doc` 的越界路径返回 500 而不是 403（而当时的本地断言写的就是 500）。
@@ -585,7 +654,6 @@ locale/{zh,en}.json  meta 与配置项文案
 harness.mjs          离线运行时：假 ctx / 假 DOM / hooks 分桶，供冒烟与预览复用
 preview.mjs          把面板渲成静态 HTML 再调无头 Chrome 截图（--all / --tab / --theme / --modal）
 smoke*.mjs           四套冒烟（召回 / client / 路由 / 渲染）
-docs/panel-*.png     六个页签 + 速记/新建/⌘K 弹窗 + 编辑态 + 检索/最近查过 + 阅读回退 + 手机版（含窄屏回退）的实拍图（真实工作区数据）
 icon.svg             侧栏图标
 ```
 

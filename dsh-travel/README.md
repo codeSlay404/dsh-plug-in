@@ -34,10 +34,6 @@
 node --check client.js && node --check index.js   # 语法
 node smoke.mjs                                    # 客户端离线冒烟,应 83/83
 node host-smoke.mjs                               # Host 路由桩测试,应 19/19
-node preview.mjs                                  # 生成 /tmp/travel-preview/*.png 截图
+node preview.mjs                                  # 生成 /tmp/travel-preview/*.png 截图（需要 Chrome）
 ```
 
-## 截图
-
-![默认当季](docs/screenshots/01-default.png)
-![AI 帮找(搜不到时)](docs/screenshots/04-ai-panel.png)

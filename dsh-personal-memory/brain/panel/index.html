@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>超级脑 · 记忆图</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1020'/%3E%3Cpath d='M16 6c5 0 9 3.6 9 8s-4 8-9 8-9-3.6-9-8 4-8 9-8z' fill='none' stroke='%236ea8fe' stroke-width='1.6'/%3E%3Ccircle cx='16' cy='14' r='2.2' fill='%23b4a0ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./brain.css">
+</head>
+<body>
+<div id="app">
+  <canvas id="stage" aria-label="三维记忆图：节点按类型分布在大脑剪影内"></canvas>
+  <div id="vignette" aria-hidden="true"></div>
+
+  <header id="hud" aria-hidden="true">
+    <div class="hud-line"><span class="hud-key">FPS</span><span id="hudFps" class="hud-val">—</span>
+      <span id="hudLoop" class="hud-chip is-live">LIVE</span></div>
+    <div class="hud-line"><span class="hud-key">CPU</span><span id="hudMs" class="hud-val">—</span>
+      <span class="hud-key">p95</span><span id="hudP95" class="hud-val">—</span></div>
+    <div class="hud-line"><span class="hud-key">数据</span><span id="hudCount" class="hud-val">—</span>
+      <span id="hudSource" class="hud-chip is-rest">—</span></div>
+    <div class="hud-line"><span class="hud-key">渲染</span><span id="hudGL" class="hud-val">—</span></div>
+  </header>
+
+  <div id="tip" hidden></div>
+
+  <aside id="panel" aria-live="polite" aria-label="节点详情">
+    <button id="panelClose" class="panel-close" aria-label="关闭详情">×</button>
+    <div id="panelBody"></div>
+  </aside>
+
+  <footer id="bar">
+    <button id="btnAnim" class="pill is-on" title="簇心漂移与环境脉冲（空格切换）">漂移</button>
+    <button id="btnPulse" class="pill is-on" title="自动激活随机记忆">脉冲</button>
+    <button id="btnReset" class="pill" title="重置视角（R）">视角</button>
+    <span id="hint" class="hint">拖拽旋转 · 滚轮缩放 · 右键平移 · 点击节点</span>
+  </footer>
+
+  <div id="banner" hidden></div>
+  <noscript><div class="noscript">这个原型需要启用 JavaScript。</div></noscript>
+</div>
+<script src="./brain.js"></script>
+</body>
+</html>

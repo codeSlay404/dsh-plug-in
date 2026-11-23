@@ -1,16 +1,16 @@
 # 股票分析 · sector-board
 
-> 插件显示名已改为「股票分析」；包名、面板 id、路由和数据目录仍为 `sector-board`，避免破坏已安装 profile。
+> 插件显示名「股票分析」；npm 包名 `dsh-sector-board`；面板 id、HTTP 路由与数据目录仍是 `sector-board`（UI 键与数据目录，与包名解耦）。
 
 DeepSeek Harness Web GUI 的全局面板：左侧栏顶部一个图标，点开就是整页市场看板。
 
-v3.10 简洁版界面与产品文档：[UI 稿](docs/ui-v3.html) · [PRD v3.10](docs/PRD.md) · [新手学习计划](docs/learning-plan.md)。v2 驾驶舱仅作历史对照：[UI 稿 v2](docs/ui-v2.html)。**当前插件面板只有 v3.10 这一套界面**：旧九分区和「切换实时看板」已删除；打开面板先显示 boot 加载层，随后请求 `/api/sector-board/dashboard.json` 等真实接口；失败显示错误与重试，不回退假数据。**全市场 5,584 只 + 927 ETF 在交易时段每 15 秒按 22 批刷新，浏览器重算市场宽度、行业/概念/主题均涨与情绪；技术信号、周期阶段、决策候选、龙虎榜/红利/事件仍是每日 ETL，界面用「全市场 15 秒 · 分析每日」区分。**今日/板块/模拟盘/更多读真实数据；个股抽屉按需请求 `stock.json`；盘中页交易时段 15 秒请求 `live.json`。v3 页面由 Host 静态路由 `/api/sector-board/v3/ui-v3.html` 直接提供；改完 `docs/ui-v3.html` / `assets/ui-v3.*` 后刷新 DSH 页面即可，无需重建 client。Host 路由本身改动需重启 DSH。
+v3.13 简洁版界面：[UI 稿](docs/ui-v3.html)。**当前插件面板只有 v3.13 这一套界面**：旧九分区和「切换实时看板」已删除；打开面板先显示 boot 加载层，随后请求 `/api/sector-board/dashboard.json` 等真实接口；失败显示错误与重试，不回退假数据。**全市场 5,584 只 + 927 ETF 在交易时段每 15 秒按 22 批刷新，浏览器重算市场宽度、行业/概念/主题均涨与情绪；技术信号、周期阶段、决策候选、龙虎榜/红利/事件仍是每日 ETL，界面用「全市场 15 秒 · 分析每日」区分。**今日/板块/模拟盘/更多读真实数据；个股抽屉按需请求 `stock.json`；盘中页交易时段 15 秒请求 `live.json`。v3 页面由 Host 静态路由 `/api/sector-board/v3/ui-v3.html` 直接提供；改完 `docs/ui-v3.html` / `assets/ui-v3.*` 后刷新 DSH 页面即可，无需重建 client。Host 路由本身改动需重启 DSH。装了 `dsh-mars-quick-controls` 后，标题栏的「刷新面板」会派发 `dsh:refresh-panel`，本面板只重载自己的 iframe，不刷新整页；`client.js` 改动仍需一次整页「强制刷新」才能加载。v3.12 起：今日页顶部有「数据健康」条与「市场阶段」卡；盘中页有「竞价异动」；连板梯队来自东方财富涨停池，失败不回退。v3.11 起：模拟盘账本日期改用当天、dashboard 过期跳过不补记；全市场实时层显示有效报价覆盖率，低于 99% 时明确提示「覆盖 xx%」。
 
 v3.9 今日页给 8 个概念热点、领涨/领跌各 8 个行业；周期主题详情带「政策追踪」，事件日历带「推荐做法」；今日结论/涨跌结构/资金叙事/人气榜随真实数据动态生成。新增「盘中」页：交易日 09:15–11:30 / 13:00–15:00 每 15 秒刷新异动流与监控池，休市显示最近快照；今日/板块/周期/模拟盘/更多均标注「全市场 15 秒 / 分析每日 / 净值 10 秒」等频率。新增「学习」页：30 天入门 + 12 个月进阶 + 费曼四步，每天 25 分钟，进度存本地；完整文字版见 [docs/learning-plan.md](docs/learning-plan.md)。
 
-以下保留 v1.8 旧九分区的数据口径，**不代表当前界面**；当前界面见上方 v3.9。旧九分区：**决策 / 盘中 / 总览 / 信息 / 周期 / 热点 / 红利 / 全球 / 机器人**。默认进入「决策」：先回答今天该不该动手、哪些龙头在周期底部出现反转、哪些在高位需要回避；结论附位置证据、触发条件与失效条件。热点 = 龙虎榜 + 游资 + 讨论热度；技术指标（均线排列、MACD 水上/水下、RSI）已经进入板块成分股、主题成分股、热点榜与个股技术抽屉。总览首屏为「指数条 + 市场温度 + 板块热力图（Treemap）」：个股涨跌家数一眼可见，板块方块按成分数定面积、按平均涨跌着色，点击看成分股；可在**申万行业（35 组）**与**概念板块（138）**之间切换，也可切回卡片列表；顶栏全局搜索支持股票名、代码、ETF、板块名与概念标签（搜「猪」能出猪肉概念，搜「光伏」能出光伏概念）。
+以下保留 v1.8 旧九分区的数据口径，**不代表当前界面**；当前界面见上方 v3.13。旧九分区：**决策 / 盘中 / 总览 / 信息 / 周期 / 热点 / 红利 / 全球 / 机器人**。默认进入「决策」：先回答今天该不该动手、哪些龙头在周期底部出现反转、哪些在高位需要回避；结论附位置证据、触发条件与失效条件。热点 = 龙虎榜 + 游资 + 讨论热度；技术指标（均线排列、MACD 水上/水下、RSI）已经进入板块成分股、主题成分股、热点榜与个股技术抽屉。总览首屏为「指数条 + 市场温度 + 板块热力图（Treemap）」：个股涨跌家数一眼可见，板块方块按成分数定面积、按平均涨跌着色，点击看成分股；可在**申万行业（35 组）**与**概念板块（138）**之间切换，也可切回卡片列表；顶栏全局搜索支持股票名、代码、ETF、板块名与概念标签（搜「猪」能出猪肉概念，搜「光伏」能出光伏概念）。
 
-- 最近快照：2026-11-19 收盘，5,579 只；31 个分组
+- 最近快照：2026-11-20 收盘，5,579 只；31 个分组
 - 面板 id：`sector-board`（`sidebar.panellist` 入口 + `main` 整页）
 - 数据目录：`~/.dsh/sector-board/`
 - 产品文档：[docs/PRD.md](docs/PRD.md)
@@ -44,6 +44,19 @@ v3.9 今日页给 8 个概念热点、领涨/领跌各 8 个行业；周期主�
 - 其他轮询：模拟盘 `/paper.json` 与更多页 `/global.json` 每 10 秒；`dashboard.json` 每 5 分钟检测新快照。
 - 展示：左侧异动列表 + 右侧监控表（按涨跌幅/涨速/量比/成交额排序）。不写文件、不推微信。
 
+## 周期龙头与 ETF 持仓（v3.13）
+
+- **龙头按业务纯度**：周期主题的「龙头股」不再取 `theme.stocks` 市值前 6，而是用 `THEME_LEADERS` 人工表（每主题 6 只）。光伏显示隆基绿能、通威股份、阳光电源、晶澳科技、天合光能、福斯特，不再出现比亚迪、格力、华能水电、中国核电、国电南瑞。
+- **相关 ETF 可点击**：主题/行业详情里的 ETF 行带 `data-etf`，点开右侧抽屉；行情来自 `etf.json`，前十大持仓由浏览器直连天天基金 `FundMNInverstPosition`（CORS 允许），显示名称、代码、行业、权重条、权重百分比，并标注披露截止日。
+- **边界**：持仓是基金定期披露的前十大，不是全部持仓；披露有滞后（当前样本截至 2026-09-30）。接口失败显示错误，不伪造。
+
+## 数据健康、市场阶段与竞价（v3.12）
+
+- **数据健康条**：今日页 pulse 下方四格，分别显示 ETL 快照时间、全市场行情覆盖率/更新时间、连板梯队日期/涨停数、成员表股票数；ETL 滞后、行情覆盖率 <99%、连板接口失败都会直接标出，不把部分数据写成全量。
+- **市场阶段**：东方财富涨停池按 `as_of` 往前取 20 个工作日，计算涨停数、连板数、最高板、晋级率、1/2/3/4/5+ 梯队；六阶段为冰点 / 启动 / 主升 / 高潮 / 退潮 / 修复，连续 2 日确认后切换，弱市对启动/主升/高潮做弱档否决。数据缓存 20 分钟；失败显示「连板数据不可用」+ 重试，不补假数据。
+- **今日主线**：概念按均涨、上涨占比、涨停占比排序取前 4；全市场普跌时标题改为「今日相对强势 · 概念」，不把负收益说成主线。
+- **竞价异动**：盘中页 09:15–09:25 扫描高开 ≥5%、低开 ≤-3%、成交额 ≥5000 万，取前 8；非竞价时段只显示下一交易日时间，不伪造竞价数据。
+
 ## 周期机会排序与公司公告（v3.9）
 
 - **周期机会优先**：板块页 11 个周期主题按机会分降序，机会分 = 状态基准分 + 5 年/1 年分位修正；每行显示「机会 / 关注 / 中性 / 回避」标签和一行「为什么有机会」（5 年分位、1 年分位、近 5 日、今日、首个先行指标）；右侧详情有机会卡、机会分和完整理由，再往下才是出清链条、政策、ETF、龙头。
@@ -59,9 +72,9 @@ v3.9 今日页给 8 个概念热点、领涨/领跌各 8 个行业；周期主�
 
 - 硬约束：最多 3 只、单只 ≤34%、100 股/份取整、双边费 0.05% 与滑点 0.05%、浮亏 -8% 强制卖出。
 - 决策来源：优先调用 opencode（CLI 或 HTTP），不可用时退回确定性规则，并在 `decisions[].mode` 标明。
-- 自动运行：launchd `com.sly.sector-robot`，工作日 14:50；日志 `~/.dsh/sector-board/robot.log`。
+- 自动运行：launchd `com.sly.sector-robot`，工作日 14:50；日志 `~/.dsh/sector-board/robot.log`。记账日期使用当天；若 dashboard 分析快照落后最近工作日，脚本会跳过（`stale-dashboard`），不会把当天行情补记到旧日期。
 - 手动运行：`python3 robot.py --run`；`--dry-run` 只看不落账；`--rules` 强制规则；`--status` 查看账户。
-- 安全闸：周末、行情日期非今日（节假日）、dashboard 超过 7 天未更新时拒绝交易并写原因。
+- 安全闸：周末、行情日期非今日（节假日）、dashboard 落后最近工作日时拒绝交易并写原因（`stale-dashboard`）。
 - 接入 opencode（已配置）：
   - `~/.dsh/sector-board/robot.env` 当前指向 OpenCode.app 内置 CLI：
     `OPENCODE_BIN=/Applications/OpenCode.app/Contents/Resources/opencode-cli`，
@@ -176,7 +189,7 @@ ETL 在 `analyze()` 里为每只股票算好一套技术快照，随成分股/�
 ## 手动跑
 
 ```bash
-cd /Users/mars/sly/project/sector-board
+cd sector-board
 python3 etl.py                 # 全量，写入 ~/.dsh/sector-board/
 python3 etl.py --limit 100     # 小样本调试
 python3 etl.py --etfs-only     # 只更新 ETF + 搜索索引
@@ -187,7 +200,21 @@ python3 paper.py --decide      # 跑一次模拟盘决策
 
 面板右上「刷新数据」只重新拉取当前快照；数据滞后时今日页出现「更新数据」，点击后 `POST /api/sector-board/refresh` 启动 Host ETL，页面每 5 秒轮询 `status.json`，跑完自动刷新。
 
-自动更新：macOS launchd `com.sly.sector-etl` 工作日 16:10 执行 `python3 etl.py --if-fresh`（plist：`~/Library/LaunchAgents/com.sly.sector-etl.plist`，日志 `/tmp/etl-launchd.log`）；DSH 定时任务 16:40 兜底。`--if-fresh` 已最新会跳过。2026-11-22 已手动补跑，dashboard `as_of=2026-11-20`。
+自动更新：用 cron / launchd / DSH 定时任务在工作日收盘后跑 `python3 etl.py --if-fresh`（数据已最新会跳过）。
+
+## 测试（v3.13）
+
+```bash
+cd sector-board
+npm test                 # 数据契约 + 浏览器 E2E
+npm run test:data        # 只跑数据契约，不打开 Chrome
+npm run test:ui          # 只跑浏览器 E2E，需要 DSH 正在运行
+```
+
+- `tests/data-contract.mjs`：只读校验 `dashboard/paper/etf/announcements`、Host API、ETF 持仓、前端无演示数据；不写业务文件、不触发 ETL。当前 10 passed / 2 warnings。
+- `tests/ui-e2e.mjs`：Chrome CDP 打开真实 Host 页面，覆盖 6 tab、周期/行业、全部主题龙头、ETF 持仓、搜索/抽屉、盘中排序/刷新、模拟盘、更多、学习、明暗、响应式、控制台错误；当前 13 passed。
+- 默认地址 `http://127.0.0.1:52896`；DSH 重启后端口会变，先设置 `SB_BASE=http://127.0.0.1:<端口>`。Chrome 路径可用 `CHROME=` 覆盖。
+- 不覆盖：会写数据或启动长任务的按钮（「更新数据」ETL、重置学习进度、外部公告/政策链接），以及真实下单（插件不接实盘）。
 
 ## Host 路由
 
@@ -211,12 +238,12 @@ python3 paper.py --decide      # 跑一次模拟盘决策
 
 ```bash
 # 在 DSH 里
-plugin_manager install_bundle /Users/mars/sly/project/sector-board
+dsh plugin add link:/绝对路径/到/sector-board
 ```
 
-卸载：`plugin_manager remove_bundle @local/sector-board`。
+卸载：`plugin_manager remove_bundle dsh-sector-board`。
 
-当前已装在 profile `desktop`，`@local/sector-board` 以符号链接指向本目录，改代码后刷新页面即可（client 半需要刷新页面重新加载）。
+当前已装在 profile `desktop`，`dsh-sector-board` 以符号链接指向本目录，改代码后刷新页面即可（client 半需要刷新页面重新加载）。
 
 ## 文件
 
@@ -228,8 +255,8 @@ client.js        Client 半：侧栏图标 + main 页（React 外壳 + iframe �
 package.json     bundle 元数据（dsh.bundle.patch / dsh.client）
 cordis.patch.yml DSH 装载条目
 icon.svg         入口图标
-docs/PRD.md      产品文档（v3.5）
-docs/ui-v3.html  v3.5 设计稿壳（引用 assets/ui-v3.*）
+docs/PRD.md      产品文档（v3.13）
+docs/ui-v3.html  v3.13 设计稿壳（引用 assets/ui-v3.*）
 docs/learning-plan.md  新手学习计划全文（30 天 + 12 个月）
 scripts/embed-v3.mjs 旧的内嵌脚本（已不再用于 client；面板改走 Host 静态路由）
 ```

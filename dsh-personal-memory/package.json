@@ -1,12 +1,12 @@
 {
   "name": "dsh-personal-memory",
-  "version": "1.1.0",
-  "private": true,
-  "description": "个人记忆面板：personal 认知 + memory 时间长河，可浏览、检索、速记、勾待办、编辑新建、星标与最近查过",
+  "version": "1.3.0",
+  "description": "个人记忆面板：personal 认知 + memory 时间长河 + 会话时间线，一个插件一张脑图（笔记小节与会话 turn 都是节点）",
   "type": "module",
   "main": "index.js",
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.0"
   },
   "exports": {
     ".": "./index.js",
@@ -15,7 +15,8 @@
     "./locale/en.json": "./locale/en.json",
     "./locale/zh.json": "./locale/zh.json",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./brain/panel/index.html": "./brain/panel/index.html"
   },
   "files": [
     "index.js",
@@ -23,8 +24,11 @@
     "client.js",
     "cordis.patch.yml",
     "icon.svg",
+    "lib",
+    "brain",
     "locale",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
@@ -57,5 +61,21 @@
     "rag",
     "recall"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "author": "codeSlay404",
+  "homepage": "https://github.com/codeSlay404/dsh-plug-in/tree/main/dsh-personal-memory#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codeSlay404/dsh-plug-in.git",
+    "directory": "dsh-personal-memory"
+  },
+  "bugs": {
+    "url": "https://github.com/codeSlay404/dsh-plug-in/issues"
+  },
+  "scripts": {
+    "check": "node smoke.mjs && node smoke-client.mjs && node check-props.mjs && node smoke-panel.mjs && node smoke-render.mjs && node smoke-brain.mjs",
+    "check:live": "node smoke-live.mjs",
+    "preview": "node preview.mjs --all",
+    "check:brain": "node smoke-brain.mjs"
+  }
 }

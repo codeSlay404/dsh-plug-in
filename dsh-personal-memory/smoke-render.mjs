@@ -3,9 +3,12 @@
 //
 // 用法：node smoke-render.mjs
 
+import { resolve } from 'node:path'
+
 import { boot, collect, walk } from './harness.mjs'
 
-const { parts, t, hostCall, settle, expand, styles, reset } = await boot({ realWorkspace: true })
+const { parts, t, hostCall, settle, expand, styles, reset } = await boot({ realWorkspace: true, workspace: process.env.DSH_MEMORY_WORKSPACE })
+
 const { expand: expandIcon } = { expand }
 
 /** 在 harness 树里找第一个 className 含某个 token 的节点（用来真的「点」它） */
@@ -39,7 +42,9 @@ const diaryDoc = await hostCall('GET', '/doc?path=' + encodeURIComponent(timelin
 
 // --- 知识库体检条：通过了只留一行小字，坏了才列出来 ---
 {
-  const auditClean = await hostCall('GET', '/audit')
+  // 用合成结果做「通过」样本：真实工作区随时可能因为一篇新笔记变成「有问题」，
+  // 断言不该跟着内容漂移（这一条就这么假失败过一次）
+  const auditClean = { items: [], counts: { p0: 0, p1: 0, p2: 0, total: 0 }, notes: 29 }
   const cleanTree = await settle(parts.MasterPersonal, { t, docs: treeData?.docs ?? [], selected: '', onOpen: noop, audit: auditClean, onCollapse: noop })
   const cleanView = collect(cleanTree)
   check('体检通过时只占一行', cleanView.classes.includes('pmp-audit-ok') && !cleanView.classes.includes('pmp-audit-bad'), '')
@@ -78,7 +83,7 @@ check('侧栏图标能渲染成 svg', iconTree && iconTree.type === 'svg')
 check('样式注入了一条 style', styles.length === 1, `${styles[0]?.length ?? 0} chars`)
 
 // --- 3.2 整页（真实数据、多轮 pass） ---
-const tree = await settle(parts.App, {})
+const tree = await settle(parts.App, { initialCollapsed: {} })
 const view = collect(tree)
 check('整页渲染出 pmp-root', view.classes.includes('pmp-root'), tree?.props?.className)
 check('六个 tab 都在', ['今天', '个人记忆', '时间长河', '未完成', '检索', '召回'].every((label) => view.all.includes(label)))
@@ -92,7 +97,7 @@ check('整页首渲染不抛异常', Boolean(tree))
 // 左栏（个人记忆页）单独渲染：树里现在也带 project/ 的笔记
 // 注意：hook 状态在组件实例上粘着，换 initialTab 必须 reset()，否则 tab 还是上一次的「今天」
 reset()
-const personalTree = await settle(parts.App, { initialTab: 'personal' })
+const personalTree = await settle(parts.App, { initialCollapsed: {}, initialTab: 'personal' })
 const treeListView = collect(personalTree)
 check('左栏有条目', treeListView.classes.includes('pmp-item'), `item=${treeListView.classes.filter((c) => c === 'pmp-item').length}`)
 check('左栏分组用 pmp-g*', treeListView.classes.some((c) => c.startsWith('pmp-g')))
@@ -170,7 +175,7 @@ check('传回收起的 collapsed 就不渲染那些天', daysAfter < daysBefore,
 reset() // 折叠是组件内 state，不清掉会把后面的时间线断言一起折了
 
 // --- 3.3 host 数据面 ---
-check('status 解析出工作区', status?.workspace === '/Users/mars/sly', String(status?.workspace))
+check('status 解析出工作区', typeof status?.workspace === 'string' && status.workspace.endsWith('sly'), String(status?.workspace))
 check('status 带面板配置', status?.config?.panelTopK !== undefined, String(status?.config?.panelTopK))
 check('时间线有天数', (timeline?.days ?? []).length > 0, `${timeline?.days?.length} 天 / ${timeline?.totals?.entries} 条`)
 check('时间线带未完成条目', (timeline?.days ?? []).some((d) => (d.todos ?? []).length > 0))
@@ -200,9 +205,22 @@ check('有记录的月份格子被点亮', timelineView.classes.filter((c) => c 
   '')
 let pickedMonth = ''
 const pickTree = await settle(parts.MasterTimeline, { ...pageProps, timeline, selected: null, onPickMonth: (key) => { pickedMonth = key } })
-const firstCell = firstWithClass(pickTree, 'pmp-ym')
-if (firstCell && typeof firstCell.props?.onClick === 'function') firstCell.props.onClick()
-check('点年份格子把月份 key 交给上层', /^month:\d{4}-\d{2}$/.test(pickedMonth), pickedMonth || '没交')
+const allCells = []
+;(function walkCells(node) {
+  if (!node || typeof node !== 'object') return
+  const classes = String(node.props?.className ?? '').split(/\s+/)
+  if (classes.includes('pmp-ym')) allCells.push(node)
+  const kids = Array.isArray(node.children) ? node.children : (node.children ? [node.children] : [])
+  for (const kid of kids) walkCells(kid)
+})(pickTree)
+const liveCell = allCells.find((cell) => !String(cell.props?.className ?? '').split(/\s+/).includes('off'))
+const deadCell = allCells.find((cell) => String(cell.props?.className ?? '').split(/\s+/).includes('off'))
+if (liveCell && typeof liveCell.props?.onClick === 'function') liveCell.props.onClick()
+check('点有记录的年份格子把月份 key 交给上层', /^month:\d{4}-\d{2}$/.test(pickedMonth), pickedMonth || '没交')
+// 空格子必须不可点：点了没反应，比看起来点不动更让人怀疑整个面板坏了
+check('没记录的月份格子是禁用的', Boolean(deadCell) && deadCell.props?.disabled === true && deadCell.props?.onClick === undefined,
+  deadCell ? JSON.stringify({ disabled: deadCell.props?.disabled, hasClick: typeof deadCell.props?.onClick }) : '没找到空格子')
+check('没记录的格子说清楚为什么点不动', allCells.some((cell) => String(cell.props?.title ?? '').includes('没有记录')), '')
 // 断档：中间少写几天，时间轴要说出来，而不是让两天挨着像连着
 const gapTimeline = { days: [
   { path: 'memory/2026/11/2026-11-20.md', date: '2026-11-20', weekday: '周五', title: '2026-11-20 周五', entries: 3, openTodos: 0, preview: '今天' },
@@ -373,10 +391,28 @@ check('markdown 待办渲染成 pmp-task', paraView.classes.includes('pmp-task')
 check('markdown 标题渲染成 pmp-h', paraView.classes.some((c) => c.startsWith('pmp-h')))
 
 // --- 3.9 召回页 ---
-const recallView = collect(await settle(parts.RecallTab, { ...pageProps, status, api: null, onToast: noop, onReload: noop }))
+const recallTree = await settle(parts.RecallTab, { ...pageProps, status, api: null, onToast: noop, onReload: noop })
+const recallView = collect(recallTree)
 check('召回页有统计卡', recallView.classes.some((c) => c.startsWith('pmp-stat') || c === 'pmp-card'),
   recallView.classes.filter((c) => c.startsWith('pmp-st')).join(','))
 check('召回页有测试输入框', recallView.tags.includes('input'))
+// 修复索引：平时是「修复索引」，点一次先变成「确认修复」（不可撤销的动作要先问一遍）
+{
+  const clsOf = (node) => String(node?.props?.className ?? '').split(/\s+/).filter(Boolean)
+  const kids = (node) => node?.children ?? node?.props?.children ?? []
+  const walkNode = (node, visit) => {
+    if (!node || typeof node !== 'object') return
+    visit(node)
+    for (const child of kids(node)) walkNode(child, visit)
+  }
+  const buttons = []
+  walkNode(recallTree, (node) => {
+    if (clsOf(node).includes('pmp-btn') && typeof node?.props?.onClick === 'function') buttons.push(node)
+  })
+  const labels = buttons.map((node) => String(collect(node).all))
+  check('召回页有「修复索引」入口', labels.some((text) => text.includes('修复索引')), labels.join(' | ').slice(0, 140))
+  check('召回页：修复索引按钮可点', buttons.some((node) => String(collect(node).all).includes('修复索引')), String(buttons.length))
+}
 
 // 命中率卡：有样本显示 used/injected 与百分比，没样本显示「—」+ 说明，不能用 0% 冒充
 const usageView = collect(await settle(parts.RecallTab, { ...pageProps, status: { ...status, usage: { days: 7, recalls: 4, injected: 20, used: 5, rate: 25 } }, api: null, onToast: noop, onReload: noop }))
@@ -423,7 +459,15 @@ check('召回过程标出会注入的条目', injected > 0, `${injected} 篇会�
 // --- 今天页：勾掉的那些也要看得见 ---
 reset()
 const doneKey = new Date().toLocaleDateString('sv-SE')
-const doneTimeline = { ...timeline, days: (timeline.days ?? []).map((day) => day.date === doneKey ? { ...day, doneTodos: 2, doneItems: [{ text: '把 wait 值改成对象', section: '产出' }, { text: '清掉 seed 行', section: '备忘' }] } : day) }
+// 造一个「今天」：真实工作区今天可能还没写日记，断言不能靠它存在
+const doneToday = {
+  path: `memory/${doneKey.slice(0, 4)}/${doneKey.slice(5, 7)}/${doneKey}.md`,
+  date: doneKey, weekday: '今天', title: `${doneKey} 今天`,
+  entries: 4, openTodos: 1, doneTodos: 2, preview: '今天写了点东西',
+  doneItems: [{ text: '把 wait 值改成对象', section: '产出' }, { text: '清掉 seed 行', section: '备忘' }],
+  todos: [{ text: '今天新想起来的一件事', line: 10, done: false, section: '未完成' }],
+}
+const doneTimeline = { days: [doneToday, ...(timeline.days ?? []).filter((day) => day.date !== doneKey)], totals: { ...(timeline.totals ?? {}), days: (timeline.days ?? []).length } }
 const doneProps = { ...pageProps, initialTab: 'today', initialDoneOpen: false, timelineOverride: doneTimeline }
 const doneTree0 = await settle(parts.App, doneProps)
 const doneView0 = collect(doneTree0)
@@ -595,9 +639,19 @@ const weekTree = await settle(parts.MasterToday, { t, timeline: { days: weekDays
 const weekView = collect(weekTree)
 const weekText = weekView.text.join('\n')
 check('今天页有「本周」条', weekView.classes.includes('pmp-week') || String(weekView.all).includes('pmp-week'), String(weekView.all).slice(0, 60))
-check('本周条只算周一起的（3 条而不是 17 条）', weekText.includes('8 条'), weekText.slice(0, 120))
+// 周的起点按客户端同一套规则算（周一起算）：跑在周日和跑在周一，预期数字不一样
+const mondayKey = (() => {
+  const now = new Date()
+  const since = (now.getDay() + 6) % 7
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - since)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+})()
+const inWeek = weekDays.filter((day) => day.date >= mondayKey)
+const expectEntries = inWeek.reduce((sum, day) => sum + (Number(day.entries) || 0), 0)
+const expectOwed = inWeek.reduce((sum, day) => sum + (Number(day.openTodos) || 0), 0)
+check('本周条只算周一起的（不算上周那 9 条）', weekText.includes(`${expectEntries} 条`) && expectEntries < 17, `${expectEntries} 条 / ${JSON.stringify(String(weekView.all).slice(0, 80))}`)
 check('本周勾掉数来自 doneItems', weekText.includes('1 勾掉'), weekText.slice(0, 120))
-check('本周新欠数正确（今天 2 + 昨天 1）', weekText.includes('3 新欠') && weekView.classes.includes('pmp-week-i') && String(weekView.all).includes('11-16'))
+check('本周新欠数正确（只算这一周里的）', weekText.includes(`${expectOwed} 新欠`), `${expectOwed} 新欠`)
 
 // 试出来的参数要能带走（给 YAML，不自动改配置）
 reset()
@@ -765,15 +819,77 @@ check('每条待办有「在等?」标记按钮', waitView.classes.filter((c) =>
 check('点「在等?」把 {text, kind} 交给上层', waitCalls.some((payload) => payload?.kind === 'market' && String(payload?.text ?? '').length > 0), JSON.stringify(waitCalls[0] ?? null))
 const waitMarkedTree = await settle(parts.MasterTodos, { t, timeline, selected: null, onOpen: noop, onToggleTodo: noop, onDeferTodo: noop, waits: { '07:30 晨报 schedule 还没建（01:38 用户明确定时任务先不动，暂缓）': 'reply' }, onWait: noop, collapsed: {}, onCollapse: noop })
 check('已标记的条目显示「等人回」', String(collect(waitMarkedTree).all).includes('等人回'), '')
-const waitFilterText = String(((timeline.days ?? []).flatMap((day) => day.todos ?? [])[0] ?? {}).text ?? '')
-const allRowsTree = await settle(parts.MasterTodos, { t, timeline, selected: null, onOpen: noop, onToggleTodo: noop, onDeferTodo: noop, waits: { [waitFilterText]: 'reply' }, onWait: noop, collapsed: {}, onCollapse: noop })
-const waitFilteredTree = await settle(parts.MasterTodos, { t, timeline, selected: null, onOpen: noop, onToggleTodo: noop, onDeferTodo: noop, waits: { [waitFilterText]: 'reply' }, onWait: noop, initialWaitOnly: true, collapsed: {}, onCollapse: noop })
+// 用合成数据：真实工作区哪天有哪条待办会变，而且 waitKeyOf 只取前 60 字（长句直接查不到）
+const waitTimeline = { days: [{ path: 'memory/2026/11/2026-11-19.md', date: '2026-11-19', weekday: '周四', title: 'x', entries: 1, openTodos: 2, doneTodos: 0, preview: '',
+  todos: [
+    { text: '合成一条在等行情的事', line: 9, section: '未完成', age: 1 },
+    { text: '合成一条能自己推进的事', line: 10, section: '未完成', age: 1 },
+  ] }], totals: { days: 1, entries: 1, openTodos: 2, latest: '2026-11-19' }, months: [] }
+const waitFilterText = '合成一条在等行情的事'
+const allRowsTree = await settle(parts.MasterTodos, { t, timeline: waitTimeline, selected: null, onOpen: noop, onToggleTodo: noop, onDeferTodo: noop, waits: { [waitFilterText]: 'reply' }, onWait: noop, collapsed: {}, onCollapse: noop })
+const waitFilteredTree = await settle(parts.MasterTodos, { t, timeline: waitTimeline, selected: null, onOpen: noop, onToggleTodo: noop, onDeferTodo: noop, waits: { [waitFilterText]: 'reply' }, onWait: noop, initialWaitOnly: true, collapsed: {}, onCollapse: noop })
 // useState 初始化只生效一次：换成「已开启筛选」的实例前必须 reset()，否则读到上一个实例的 false
 reset()
-const waitFilteredTree2 = await settle(parts.MasterTodos, { t, timeline, selected: null, onOpen: noop, onToggleTodo: noop, onDeferTodo: noop, waits: { [waitFilterText]: 'reply' }, onWait: noop, initialWaitOnly: true, collapsed: {}, onCollapse: noop })
+const waitFilteredTree2 = await settle(parts.MasterTodos, { t, timeline: waitTimeline, selected: null, onOpen: noop, onToggleTodo: noop, onDeferTodo: noop, waits: { [waitFilterText]: 'reply' }, onWait: noop, initialWaitOnly: true, collapsed: {}, onCollapse: noop })
 const rowCount = (view) => view.classes.filter((c) => c === 'pmp-td-box').length
 check('「只看在等的」真的把列表收窄到标过的条目', rowCount(collect(waitFilteredTree2)) < rowCount(collect(allRowsTree)) && rowCount(collect(waitFilteredTree2)) >= 1, `${rowCount(collect(allRowsTree))} -> ${rowCount(collect(waitFilteredTree2))}`)
 reset()
+
+// 同一件事被抄进好几天的「未完成」：默认只留最新一条，徽标告诉人重提了几次
+{
+  const dupItem = (date, text) => ({ text, line: 9, section: '未完成', age: 1, date, weekday: '周一', path: `memory/2026/11/${date}.md`, preview: '', dupKey: 'dup-1', dupCount: 3, dupDates: ['2026-11-16', '2026-11-17', '2026-11-18'] })
+  const dupTimeline = { days: [
+    { path: 'memory/2026/11/2026-11-18.md', date: '2026-11-18', weekday: '周二', title: 'x', entries: 1, openTodos: 1, doneTodos: 0, preview: '', todos: [dupItem('2026-11-18', '合成一条被抄了三遍的事')] },
+    { path: 'memory/2026/11/2026-11-17.md', date: '2026-11-17', weekday: '周一', title: 'x', entries: 1, openTodos: 1, doneTodos: 0, preview: '', todos: [dupItem('2026-11-17', '合成一条被抄了三遍的事（措辞略变）')] },
+    { path: 'memory/2026/11/2026-11-16.md', date: '2026-11-16', weekday: '周日', title: 'x', entries: 1, openTodos: 1, doneTodos: 0, preview: '', todos: [dupItem('2026-11-16', '合成一条被抄了三遍的事（更早版本）')] },
+  ], totals: { days: 3, entries: 3, openTodos: 3, latest: '2026-11-18' }, months: [] }
+  const dupBase = { t, timeline: dupTimeline, selected: null, onOpen: noop, onToggleTodo: noop, onDeferTodo: noop, waits: {}, onWait: noop, collapsed: {}, onCollapse: noop }
+  const dupTree = await settle(parts.MasterTodos, dupBase)
+  const dupRows = collect(dupTree).classes.filter((cls) => cls === 'pmp-td-box').length
+  check('重复待办：默认只显示一条', dupRows === 1, String(dupRows))
+  check('重复待办：徽标写「重提 3 次」', String(collect(dupTree).all).includes('重提 3 次'), '')
+  check('重复待办：计数写成「1 件（记录 3 条）」', String(collect(dupTree).all).includes('1 件（记录 3 条）'), '')
+  reset()
+  const dupMoreTree = await settle(parts.MasterTodos, { ...dupBase, initialShowDup: true })
+  const dupMoreRows = collect(dupMoreTree).classes.filter((cls) => cls === 'pmp-td-box').length
+  check('重复待办：展开后三条都在', dupMoreRows === 3, String(dupMoreRows))
+}
+
+// 状态条待办计数：件＝去重数、条＝行数，规则直接测纯函数。
+// （不再往 App 里塞假 counts —— App 会异步拉到真实 status 覆盖 props，
+//   那种断言看着在测渲染，其实测的是当下真实工作区有多少待办，会随数据漂。）
+{
+  const fakeT = (key) => ({ 'meta.todosItem': '件', 'meta.todosRow': '条' })[key] ?? key
+  const split = { openTodos: 40, openTodosDistinct: 31 }
+  check('计数：有重复时显示去重后的件数', parts.todoCountValue(split) === 31, String(parts.todoCountValue(split)))
+  const extra = parts.todoCountExtra(split, fakeT)
+  check('计数：有重复时补「件 / 条」后缀', extra.includes('件 /') && extra.includes('40') && extra.includes('条'), extra)
+  const same = { openTodos: 7, openTodosDistinct: 7 }
+  check('计数：没重复时只写数字', parts.todoCountValue(same) === 7, String(parts.todoCountValue(same)))
+  check('计数：没重复时不补后缀', parts.todoCountExtra(same, fakeT) === '', parts.todoCountExtra(same, fakeT))
+  const noDistinct = { openTodos: 9 }
+  check('计数：上游没给去重数时退回总数', parts.todoCountValue(noDistinct) === 9, String(parts.todoCountValue(noDistinct)))
+}
+
+// 带日期的一次性动作过期了：标出来，但不由代码替人勾掉
+{
+  const expTimeline = { days: [
+    { path: 'memory/2026/11/2026-11-15.md', date: '2026-11-15', weekday: '周日', title: 'x', entries: 1, openTodos: 2, doneTodos: 0, preview: '',
+      todos: [
+        { text: '11-16 开盘：合成一条过期的一次性动作', line: 9, section: '未完成', age: 7, expired: true, expiredOn: '2026-11-16', expiredDays: 6 },
+        { text: '合成一条真的还在等的事', line: 10, section: '未完成', age: 7 },
+      ] },
+  ], totals: { days: 1, entries: 1, openTodos: 2, latest: '2026-11-15' }, months: [] }
+  const expBase = { t, timeline: expTimeline, selected: null, onOpen: noop, onToggleTodo: noop, onDeferTodo: noop, waits: {}, onWait: noop, collapsed: {}, onCollapse: noop }
+  const expTree = await settle(parts.MasterTodos, expBase)
+  check('过期：行上有「过期 6 天」徽标', String(collect(expTree).all).includes('过期 6 天'), '')
+  check('过期：有过期条目时出现筛选 chip', String(collect(expTree).all).includes('过期的 1 条'), '')
+  reset()
+  const expOnly = await settle(parts.MasterTodos, { ...expBase, initialExpiredOnly: true })
+  const expRows = collect(expOnly).classes.filter((cls) => cls === 'pmp-td-box').length
+  check('过期：只看过期时只剩那一条', expRows === 1, String(expRows))
+  reset()
+}
 
 // 点开「挪过 N 次」看每一步的理由：第二次起改期会先问一句为什么
 {
@@ -1190,13 +1306,24 @@ reset()
 
 // 排序切换：两种顺序都是合理诉求，切换后要真的换顺序、并且把选择交给上层记住
 const sortPicked = []
-const sortFresh = await settle(parts.MasterToday, { t, timeline, docs: [], selected: null, onOpen: noop, onToggleTodo: noop, onQuickTodo: async () => true, todoSort: 'fresh', onTodoSort: (value) => sortPicked.push(value) })
+// 年龄固定的合成数据：真实待办每天都在变老，写死「10 天前」迟早会假失败
+const dayKeyAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d.toLocaleDateString('sv-SE') }
+const sortTimeline = { days: [
+  { path: `memory/x/${dayKeyAgo(10)}.md`, date: dayKeyAgo(10), weekday: '周一', title: '十天前', entries: 1, openTodos: 1, doneTodos: 0, preview: '十天前', todos: [{ text: '十天前欠的', line: 3, done: false, section: '未完成' }] },
+  { path: `memory/x/${dayKeyAgo(3)}.md`, date: dayKeyAgo(3), weekday: '周五', title: '三天前', entries: 1, openTodos: 1, doneTodos: 0, preview: '三天前', todos: [{ text: '三天前欠的', line: 3, done: false, section: '未完成' }] },
+  { path: `memory/x/${dayKeyAgo(0)}.md`, date: dayKeyAgo(0), weekday: '今天', title: '今天', entries: 1, openTodos: 1, doneTodos: 0, preview: '今天', todos: [{ text: '今天新想起来的事', line: 3, done: false, section: '未完成' }] },
+], totals: { days: 3, entries: 3, openTodos: 3 } }
+const sortFresh = await settle(parts.MasterToday, { t, timeline: sortTimeline, docs: [], selected: null, onOpen: noop, onToggleTodo: noop, onQuickTodo: async () => true, todoSort: 'fresh', onTodoSort: (value) => sortPicked.push(value) })
 const sortFreshView = collect(sortFresh)
-const sortOldest = await settle(parts.MasterToday, { t, timeline, docs: [], selected: null, onOpen: noop, onToggleTodo: noop, onQuickTodo: async () => true, todoSort: 'oldest', onTodoSort: (value) => sortPicked.push(value) })
+const sortOldest = await settle(parts.MasterToday, { t, timeline: sortTimeline, docs: [], selected: null, onOpen: noop, onToggleTodo: noop, onQuickTodo: async () => true, todoSort: 'oldest', onTodoSort: (value) => sortPicked.push(value) })
 const sortOldestView = collect(sortOldest)
 const firstDays = (view) => String(view.all).match(/\d+ 天前/g) ?? []
 check('今天页有排序切换', sortFreshView.classes.filter((c) => c === 'pmp-chipb').length >= 2, `chips ${sortFreshView.classes.filter((c) => c === 'pmp-chipb').length}`)
-check('默认排序：今天新加的在前', /\d+ 天前/.test(String(sortFreshView.all)) && firstDays(sortFreshView)[0] !== '10 天前', firstDays(sortFreshView).slice(0, 2).join(','))
+// 「今天新加的」那行不带「N 天前」，所以要比出现顺序而不是比天数
+const freshOrder = String(sortFreshView.all)
+check('默认排序：今天新加的在前',
+  freshOrder.indexOf('今天新想起来的事') >= 0 && freshOrder.indexOf('今天新想起来的事') < freshOrder.indexOf('十天前欠的'),
+  `today@${freshOrder.indexOf('今天新想起来的事')} old@${freshOrder.indexOf('十天前欠的')}`)
 check('最久没动的在前时，最老的排第一', firstDays(sortOldestView)[0] === '10 天前', firstDays(sortOldestView).slice(0, 3).join(','))
 check('点排序把选择交给上层记住', (function () {
   const hit = firstWithClass(sortOldest, 'pmp-chipb')
@@ -1245,9 +1372,9 @@ const findInput = (node) => {
 findInput(todayTree)
 check('加待办的输入框带提示', addInput.some((node) => String(node.props.placeholder).includes('未完成') || String(node.props.placeholder).includes('回车')), JSON.stringify(addInput.map((n) => n.props.placeholder)))
 
-// 「今天还没写」时首屏给一块更硬的动作位（真实数据里今天已经写了，所以用假 timeline）
+// 「今天还没写」时首屏给一块更硬的动作位（真实数据里今天写没写不一定，所以两头都用假 timeline）
 reset()
-const emptyTimeline = { ...timeline, days: (timeline.days ?? []).filter((day) => day.date !== '2026-11-20') }
+const emptyTimeline = { ...timeline, days: (timeline.days ?? []).filter((day) => day.date !== new Date().toLocaleDateString('sv-SE')) }
 const emptyToday = collect(await settle(parts.MasterToday, {
   t,
   timeline: emptyTimeline,
@@ -1262,7 +1389,7 @@ check('提示条有「写今天的第一条」', emptyToday.all.includes('写今
 reset()
 const writtenToday = collect(await settle(parts.MasterToday, {
   t,
-  timeline,
+  timeline: { days: [doneToday, ...(timeline.days ?? []).filter((day) => day.date !== doneKey)], totals: timeline.totals },
   docs: treeData?.docs ?? [],
   selected: null,
   onOpen: noop,
@@ -1300,7 +1427,7 @@ check('设置分区渲染成功', Boolean(settingsView))
 // --- 3.10 阅读路径回退：从左栏点进两篇，退回上一篇 ---
 reset()
 let seenPath = null
-const appBackTree = await settle(parts.App, { t, api: new parts.Api(), initialTab: 'personal' })
+const appBackTree = await settle(parts.App, { initialCollapsed: {}, t, api: new parts.Api(), initialTab: 'personal' })
 const itemsOf = (tree) => {
   const out = []
   const visit = (node) => {
@@ -1318,7 +1445,7 @@ check('左栏条目带点击行为', firstItems.every((item) => typeof item.prop
 // 回退按钮只在栈里有东西时出现：初始渲染不该有
 const histButtons = (view) => view.classes.filter((c) => c === 'pmp-histback').length
 reset()
-const freshBackView = collect(await settle(parts.App, { t, api: new parts.Api(), initialTab: 'personal', initialPath: (treeData?.docs ?? [])[0]?.path ?? null }))
+const freshBackView = collect(await settle(parts.App, { initialCollapsed: {}, t, api: new parts.Api(), initialTab: 'personal', initialPath: (treeData?.docs ?? [])[0]?.path ?? null }))
 check('刚打开时没有「上一处」', histButtons(freshBackView) === 0, `${histButtons(freshBackView)} 个`)
 
 // DocReader 层面：canHistoryBack 为真才给按钮，点了交给上层
@@ -1348,22 +1475,22 @@ const appItems = (tree) => {
   }
   visit(tree); return out
 }
-let appTree = await settle(parts.App, { t, api: new parts.Api(), initialTab: 'personal' })
+let appTree = await settle(parts.App, { initialCollapsed: {}, t, api: new parts.Api(), initialTab: 'personal' })
 await new Promise((r) => setTimeout(r, 500))
-appTree = await settle(parts.App, { t })
+appTree = await settle(parts.App, { initialCollapsed: {}, t })
 const autoOpened = collect(appTree).all
 const otherItem = appItems(appTree).find((item) => typeof item.props?.onClick === 'function'
   && !String(collect(item).all).includes(String(autoOpened).includes('关于我') ? '关于我' : '\u0000'))
 if (otherItem) otherItem.props.onClick()
 await new Promise((r) => setTimeout(r, 600))
-appTree = await settle(parts.App, { t })
+appTree = await settle(parts.App, { initialCollapsed: {}, t })
 const appView = collect(appTree)
 check('换一篇之后出现「上一处」按钮', appView.classes.filter((c) => c === 'pmp-histback').length === 1,
   `${appView.classes.filter((c) => c === 'pmp-histback').length} 个`)
 const appBack = firstWithClass(appTree, 'pmp-histback')
 if (appBack && typeof appBack.props?.onClick === 'function') appBack.props.onClick()
 await new Promise((r) => setTimeout(r, 600))
-const backView = collect(await settle(parts.App, { t }))
+const backView = collect(await settle(parts.App, { initialCollapsed: {}, t }))
 check('点「上一处」真的回到上一篇', String(backView.all).includes('关于我') && backView.classes.includes('pmp-doc'),
   String(backView.all).slice(0, 80))
 
@@ -1371,7 +1498,7 @@ check('点「上一处」真的回到上一篇', String(backView.all).includes('
 globalThis.__pmViewportWidth = 390
 reset()
 reset()
-const narrowTree = await settle(parts.App, { initialTab: 'personal' })
+const narrowTree = await settle(parts.App, { initialCollapsed: {}, initialTab: 'personal' })
 const narrowView = collect(narrowTree)
 check('窄屏不自动打开文档', !String(narrowTree?.props?.className ?? '').includes('pmp-doc-open'), narrowTree?.props?.className)
 check('窄屏仍渲染列表', narrowView.classes.includes('pmp-item'))

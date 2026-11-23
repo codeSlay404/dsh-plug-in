@@ -1,12 +1,12 @@
 {
   "name": "dsh-travel",
   "version": "1.0.0",
-  "private": true,
   "description": "旅行灵感面板:按当季/四季推荐目的地,重点写「当地最好玩的事」(玩法、吃法、贴士,不只是景点),支持玩法筛选、搜索、随机灵感与想去收藏",
   "type": "module",
   "main": "index.js",
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.0"
   },
   "exports": {
     ".": "./index.js",
@@ -24,8 +24,8 @@
     "cordis.patch.yml",
     "icon.svg",
     "locale",
-    "docs",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
@@ -53,5 +53,15 @@
     "trip",
     "panel"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "author": "codeSlay404",
+  "homepage": "https://github.com/codeSlay404/dsh-plug-in/tree/main/dsh-travel#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codeSlay404/dsh-plug-in.git",
+    "directory": "dsh-travel"
+  },
+  "bugs": {
+    "url": "https://github.com/codeSlay404/dsh-plug-in/issues"
+  }
 }

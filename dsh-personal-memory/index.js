@@ -26,6 +26,8 @@ import { appendFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile }
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { guardOptions, isTrustedRequest } from './guard.js'
+import { createBrain } from './lib/brain/index.mjs'
+import { createBrainRoutes, servePanel } from './lib/brain/routes.mjs'
 
 export const name = 'personal-memory'
 /** webServer 给面板提供数据接口；workingDirectory 用来定位工作区（DSH 的 cwd 不是工作区）。 */
@@ -110,10 +112,76 @@ const DEFAULTS = {
   /** 写调试日志到 ~/.dsh/logs/personal-memory.jsonl。 */
   debug: false,
   log: true,
+  /**
+   * 脑图（与面板共用一份数据）。节点两类：note（笔记小节）与 episode（会话回合）。
+   * 召回仍只有一条注入块，脑图扩散结果与 ctx-server 检索结果按 alpha/beta 融合。
+   */
+  brain: {
+    enabled: true,
+    /** 会话回合要不要进脑（默认 true：记忆里的东西都进脑）。 */
+    ingestSessions: true,
+    /** 会话日志根目录，留空 = ~/.dsh/sessions。 */
+    sessionsRoot: '',
+    /** 一次扫描最多处理多少个会话文件。 */
+    maxSessionFiles: 400,
+    /** 后台扫描间隔（分钟），0 = 只在启动时扫一次。 */
+    scanMinutes: 10,
+    /** 融合权重：ctx 检索 0.7 / 脑图扩散 0.3。 */
+    alpha: 0.7,
+    beta: 0.3,
+    /** note×1.0 / episode×0.6，会话片段在召回里降权。 */
+    episodeWeight: 0.6,
+    /** 扩散参数。 */
+    hopCount: 3,
+    hopDecay: 0.65,
+    minWeight: 0.15,
+    minActivation: 0.02,
+    maxNodes: 256,
+    fanout: 32,
+    inhibitionScale: 1,
+    /** 融合时允许进入注入块的最低脑图分。 */
+    threshold: 0.02,
+    maxChars: 1200,
+    /** 巩固一次最多看多少 episode。 */
+    consolidateLimit: 400,
+    /** 脑库路径覆盖，留空 = ~/.dsh/personal-memory/brain.db。 */
+    dbPath: '',
+  },
 }
 
 const NUMBER_KEYS = new Set(['topK', 'threshold', 'excerptChars', 'semanticSnippetRatio', 'maxChars', 'minQueryChars', 'maxQueryChars', 'timeoutMs', 'perSessionDocLimit', 'panelTopK', 'cacheMs'])
 const BOOLEAN_KEYS = new Set(['enabled', 'mmr', 'debug', 'log', 'quickNote', 'autoReindex'])
+
+const BRAIN_NUMBER_KEYS = new Set(['maxSessionFiles', 'scanMinutes', 'alpha', 'beta', 'episodeWeight', 'hopCount', 'hopDecay', 'minWeight', 'minActivation', 'maxNodes', 'fanout', 'inhibitionScale', 'threshold', 'maxChars', 'consolidateLimit'])
+const BRAIN_BOOLEAN_KEYS = new Set(['enabled', 'ingestSessions'])
+
+/** brain 是嵌套对象：平铺的 String() 会把它变成 "[object Object]"，必须单独合并。 */
+function readBrainConfig(given) {
+  const brain = { ...DEFAULTS.brain }
+  if (!given || typeof given !== 'object' || Array.isArray(given)) return brain
+  for (const key of Object.keys(DEFAULTS.brain)) {
+    const value = given[key]
+    if (value === undefined || value === null || value === '') continue
+    if (BRAIN_NUMBER_KEYS.has(key)) {
+      const num = Number(value)
+      if (Number.isFinite(num)) brain[key] = num
+    } else if (BRAIN_BOOLEAN_KEYS.has(key)) {
+      brain[key] = value === true || value === 'true' || value === 1 || value === '1'
+    } else {
+      brain[key] = String(value)
+    }
+  }
+  if (!Number.isFinite(brain.alpha) || brain.alpha < 0) brain.alpha = DEFAULTS.brain.alpha
+  if (!Number.isFinite(brain.beta) || brain.beta < 0) brain.beta = DEFAULTS.brain.beta
+  if (!Number.isFinite(brain.episodeWeight) || brain.episodeWeight <= 0) brain.episodeWeight = DEFAULTS.brain.episodeWeight
+  if (!Number.isFinite(brain.hopCount) || brain.hopCount < 1) brain.hopCount = DEFAULTS.brain.hopCount
+  // 兼容 `ingest: { sessions: false }` 这种分组写法（任务书里的 ingest.sessions 开关）
+  const grouped = given.ingest
+  if (grouped && typeof grouped === 'object' && grouped.sessions !== undefined) {
+    brain.ingestSessions = grouped.sessions === true || grouped.sessions === 'true' || grouped.sessions === 1
+  }
+  return brain
+}
 
 function readConfig(raw) {
   const cfg = { ...DEFAULTS }
@@ -121,7 +189,8 @@ function readConfig(raw) {
   for (const key of Object.keys(DEFAULTS)) {
     const given = raw[key]
     if (given === undefined || given === null) continue
-    if (NUMBER_KEYS.has(key)) cfg[key] = Number(given)
+    if (key === 'brain') cfg.brain = readBrainConfig(given)
+    else if (NUMBER_KEYS.has(key)) cfg[key] = Number(given)
     else if (BOOLEAN_KEYS.has(key)) cfg[key] = Boolean(given)
     else cfg[key] = String(given)
   }
@@ -186,6 +255,59 @@ function alreadyInjected(session) {
 function compact(text, limit) {
   const flat = String(text ?? '').replace(/\s+/g, ' ').trim()
   return flat.length > limit ? `${flat.slice(0, limit)}…` : flat
+}
+
+/**
+ * 把 ctx-server 的检索结果与脑图扩散结果融合成一组候选（仍然是**一条**注入块）。
+ * 两边各自按本次最大值归一到 0..1，再按 alpha/beta 加权：alpha 管「语义像」，
+ * beta 管「脑图里被激活」。脑图独有的候选（比如会话片段）也能进来。
+ */
+function fuseRecallHits(hits, brainRows, cfg) {
+  const b = cfg.brain || DEFAULTS.brain
+  const alpha = Number(b.alpha) >= 0 ? Number(b.alpha) : DEFAULTS.brain.alpha
+  const beta = Number(b.beta) >= 0 ? Number(b.beta) : DEFAULTS.brain.beta
+  if (!Array.isArray(brainRows) || !brainRows.length || beta <= 0) {
+    return hits.map((hit) => ({ ...hit, brainScore: 0 }))
+  }
+  const ctxMax = Math.max(0.0001, ...hits.map((hit) => Number(hit.score) || 0))
+  const brainMax = Math.max(0.0001, ...brainRows.map((row) => Number(row.final) || 0))
+  const brainByPath = new Map()
+  for (const row of brainRows) {
+    const key = row.path || `node:${row.nodeKey}`
+    const prev = brainByPath.get(key)
+    if (!prev || (row.final ?? 0) > (prev.final ?? 0)) brainByPath.set(key, row)
+  }
+  const merged = []
+  const seen = new Set()
+  for (const hit of hits) {
+    const key = hit.path || `doc:${hit.docId}`
+    seen.add(key)
+    const row = brainByPath.get(key)
+    const brainScore = row ? (Number(row.final) || 0) / brainMax : 0
+    merged.push({
+      ...hit,
+      score: alpha * ((Number(hit.score) || 0) / ctxMax) + beta * brainScore,
+      brainScore,
+      // 既有原文块、又被脑图激活的，标 both：面板里能看出这条为什么排前面
+      via: row && hit.via !== 'keyword' ? 'both' : hit.via,
+    })
+  }
+  for (const [key, row] of brainByPath) {
+    if (seen.has(key)) continue
+    merged.push({
+      docId: `brain:${row.nodeKey}`,
+      title: row.title || '未命名',
+      heading: row.heading || '',
+      text: row.text || '',
+      score: beta * ((Number(row.final) || 0) / brainMax),
+      path: row.path || '',
+      via: 'brain',
+      nodeKind: row.nodeKind,
+      brainScore: 1,
+    })
+  }
+  merged.sort((left, right) => right.score - left.score || (right.brainScore || 0) - (left.brainScore || 0))
+  return merged
 }
 
 function withTimeout(signal, ms) {
@@ -1256,14 +1378,14 @@ function sanitizeUi(raw) {
     out[key] = value
     count += 1
   }
-  const sort = raw.todoSort
-  if (typeof sort === 'string' && TODO_SORTS.includes(sort)) out.todoSort = sort
-  const searchSort = raw.searchSort
-  if (typeof searchSort === 'string' && SEARCH_SORTS.includes(searchSort)) out.searchSort = searchSort
+  // 排序偏好是 ui 的兄弟字段，不能塞进 collapsed：
+  // 早先 `out.todoSort = sort` 把偏好写进了折叠表，state.json 里长出一堆 `collapsed.todoSort`
+  const sort = typeof raw.todoSort === 'string' && TODO_SORTS.includes(raw.todoSort) ? raw.todoSort : ''
+  const searchSort = typeof raw.searchSort === 'string' && SEARCH_SORTS.includes(raw.searchSort) ? raw.searchSort : ''
   return {
     collapsed: out,
-    ...(out.todoSort ? { todoSort: out.todoSort } : {}),
-    ...(out.searchSort ? { searchSort: out.searchSort } : {}),
+    ...(sort ? { todoSort: sort } : {}),
+    ...(searchSort ? { searchSort } : {}),
   }
 }
 
@@ -1940,7 +2062,7 @@ async function ctxServerGet(path) {
 }
 
 /** 面板的所有数据接口。全部只读，除了 /note（只追加）和 /reindex（重建索引）。 */
-function apiRoute(cfg, ctx, cache) {
+function apiRoute(cfg, ctx, cache, brain) {
   const prefix = '/personal-memory'
 
   const status = async () => {
@@ -2002,6 +2124,16 @@ function apiRoute(cfg, ctx, cache) {
         diaries: diaries.length,
         memoryEntries: diaries.reduce((sum, d) => sum + (d.diary?.entries ?? 0), 0),
         openTodos: diaries.reduce((sum, d) => sum + (d.diary?.openTodos ?? 0), 0),
+        // 状态条和未完成页必须说同一个数：按行数是 40，按「同一件事」是 31
+        openTodosDistinct: (() => {
+          const rows = []
+          for (const doc of diaries) {
+            for (const item of doc.diary?.todos ?? []) if (item.done !== true) rows.push({ item: { text: item.text }, date: String(doc.path).slice(-13, -3) })
+          }
+          if (rows.length === 0) return 0
+          clusterTodos(rows)
+          return new Set(rows.map((row) => row.item.dupKey)).size
+        })(),
         project: project.length,
         chars: docs.reduce((sum, d) => sum + (d.chars ?? 0), 0),
         lastDiary: diaries.slice().sort((a, b) => (b.path > a.path ? 1 : -1))[0]?.path ?? null,
@@ -2063,6 +2195,104 @@ function apiRoute(cfg, ctx, cache) {
     return { ...described, text, toc: tocOf(text), hash: hashText(text), mtimeMs: stats.mtimeMs }
   }
 
+  /**
+   * 待办的「同一件事」聚簇。
+   *
+   * 现实里的日记是这么写的：今天欠的事，明天再抄一遍到「未完成」里。于是同一件事
+   * 在磁盘上有 5 行、跨 5 天，面板按行计数就会吓人（40 条待办、其实 25 件事）。
+   * 这里用字面重叠（中文 2-gram + 英文/数字词）做贪心聚簇，只做「足够像」的合并，
+   * 宁可漏合并也不要把两件事并成一件。
+   *
+   * 阈值 0.3 是按真机 40 行调的：纯交集 0.45 一条都合不上（40 簇），
+   * IDF 加权 0.3 得到 31 簇，把 watchlist / ollama / 观察层 / 11-16 开盘那几条合上了。
+   */
+  const CLUSTER_MIN_SCORE = 0.3
+  function todoTokens(text) {
+    const clean = String(text ?? '').replace(/[\s\p{P}\p{S}]+/gu, ' ').trim()
+    const tokens = new Set()
+    for (const word of clean.match(/[A-Za-z][A-Za-z0-9_.\-]{1,}|\d{3,}/g) ?? []) tokens.add(word.toLowerCase())
+    const han = clean.replace(/[^\p{Script=Han}]/gu, '')
+    for (let i = 0; i + 2 <= han.length; i += 1) tokens.add(han.slice(i, i + 2))
+    return tokens
+  }
+
+  /**
+   * 带日期的一次性动作（「11-16 开盘清仓」「今晚 22:30 学习队列」）过了那天就没有意义了，
+   * 但没人会回头去勾它——于是它们永远挂在「未完成」里。
+   * 只做标记，不自动勾掉：判断「这件事是不是已经做了」不该由正则替人决定。
+   */
+  function todoExpiry(text, todayKey, ownKey) {
+    const raw = String(text ?? '')
+    const found = []
+    for (const match of raw.matchAll(/(\d{4})-(\d{2})-(\d{2})/g)) found.push(`${match[1]}-${match[2]}-${match[3]}`)
+    for (const match of raw.matchAll(/(?<!\d)(\d{1,2})-(\d{1,2})(?!\d)/g)) {
+      const month = Number(match[1])
+      const day = Number(match[2])
+      if (month < 1 || month > 12 || day < 1 || day > 31) continue
+      found.push(`${todayKey.slice(0, 4)}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`)
+    }
+    for (const match of raw.matchAll(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/g)) {
+      const month = Number(match[1])
+      const day = Number(match[2])
+      if (month < 1 || month > 12 || day < 1 || day > 31) continue
+      found.push(`${todayKey.slice(0, 4)}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`)
+    }
+    const today = todayKey
+    const own = String(ownKey ?? '')
+    // 只算「写下那天之后的日期」：正文里出现一个更早的日期是回顾（「11-21 遗留」），不是截止
+    const planned = own ? found.filter((date) => date >= own) : found
+    const past = planned.filter((date) => date < today).sort()
+    if (past.length === 0) return null
+    const latest = past[past.length - 1]
+    const days = Math.round((Date.parse(`${today}T00:00:00`) - Date.parse(`${latest}T00:00:00`)) / 86400000)
+    return { on: latest, days: Number.isFinite(days) ? days : 0 }
+  }
+
+  function clusterTodos(rows) {
+    // 先算词频：「清源 / 开盘」这类到处都是的词不该给合井贡献分数，
+    // 「002865 / ollama / 观察层」这类稀有词才是真正的身份。
+    const tokenRows = rows.map((row) => todoTokens(row.item?.text ?? row.text))
+    const df = new Map()
+    for (const tokens of tokenRows) for (const token of tokens) df.set(token, (df.get(token) ?? 0) + 1)
+    const idf = (token) => Math.log(1 + rows.length / (1 + (df.get(token) ?? 1)))
+    const weight = (tokens) => { let sum = 0; for (const token of tokens) sum += idf(token); return sum }
+    const groups = []
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index]
+      const tokens = tokenRows[index]
+      const own = weight(tokens)
+      let target = null
+      let best = 0
+      for (const group of groups) {
+        let shared = 0
+        for (const token of tokens) if (group.tokens.has(token)) shared += idf(token)
+        if (shared === 0) continue
+        // 长的那一侧做分母：短句被长句包含时也能合上，但不奖励一边倒的长文
+        const score = shared / Math.max(own || 1, group.weight || 1)
+        if (score > best && score >= CLUSTER_MIN_SCORE) { best = score; target = group }
+      }
+      if (!target) {
+        target = { id: `dup-${groups.length + 1}`, tokens: new Set(), weight: 0, rows: [] }
+        groups.push(target)
+      }
+      for (const token of tokens) target.tokens.add(token)
+      target.weight = Math.max(target.weight, own)
+      target.rows.push(row)
+    }
+    const byId = new Map(groups.map((group) => [group.id, group.rows]))
+    for (const group of groups) {
+      const dates = [...new Set(group.rows.map((row) => row.date))].sort()
+      for (const row of group.rows) {
+        // row 可能是 { item, date } 包装，也可能就是待办对象本身
+        const target = row.item ?? row
+        target.dupKey = group.id
+        target.dupCount = group.rows.length
+        target.dupDates = dates
+      }
+    }
+    return byId
+  }
+
   const timeline = async ({ query }) => {
     const workspace = resolveWorkspace(ctx, cfg)
     if (!workspace) return { workspace: null, days: [], months: [] }
@@ -2117,6 +2347,17 @@ function apiRoute(cfg, ctx, cache) {
         sections: d.diary.sections,
       }))
       .sort((a, b) => (a.date < b.date ? 1 : -1))
+    // 同一件事跨天重复写：给每行标上聚类号，面板才能把它显示成「×N 天」而不是 N 条
+    {
+      const todayKey = localDateKey()
+      for (const day of days) {
+        for (const item of day.todos ?? []) {
+          const expiry = todoExpiry(item.text, todayKey, day.date)
+          if (expiry) { item.expired = true; item.expiredOn = expiry.on; item.expiredDays = expiry.days }
+        }
+      }
+    }
+    clusterTodos(days.flatMap((day) => (day.todos ?? []).map((item) => ({ item, date: day.date }))))
     const monthMap = new Map()
     for (const day of days) {
       const key = day.date.slice(0, 7)
@@ -2401,13 +2642,17 @@ function apiRoute(cfg, ctx, cache) {
     }
   }
 
-  const reindex = async () => {
-    const res = await fetch(`${CTX_SERVER}/reindex`, { method: 'POST', signal: AbortSignal.timeout(180000) })
+  // repair=true 走 /repair：库已经坏了（disk I/O error、只剩 4KB 空壳）时的正路，
+  // 旧库会被挪到 ctx.db.broken-<时间>，然后从笔记重建。索引是派生物，删了不丢笔记。
+  const reindex = async ({ body } = {}) => {
+    const repair = body?.repair === true
+    const url = `${CTX_SERVER}${repair ? '/repair' : '/reindex'}`
+    const res = await fetch(url, { method: 'POST', signal: AbortSignal.timeout(240000) })
     if (!res.ok) throw new Error(`ctx-server HTTP ${res.status}`)
     const env = await res.json()
-    if (env.ok !== true) throw new Error(env.error ?? '重建索引失败')
+    if (env.ok !== true) throw new Error(env.error ?? (repair ? '修复索引失败' : '重建索引失败'))
     if (cache.docs) cache.at = 0
-    return env.value ?? {}
+    return { ...(env.value ?? {}), repaired: repair }
   }
 
   const note = async ({ body }) => {
@@ -2952,6 +3197,9 @@ return withLock(`state:${workspace}`, async () => {
     'POST /wait': wait,
   }
 
+  // 脑图接口统一挂在 /personal-memory/brain/* 下（不另开 /api/superbrain/*）。
+  if (brain) Object.assign(routes, createBrainRoutes(brain))
+
   return {
     kind: 'prefix',
     path: prefix,
@@ -2976,6 +3224,10 @@ return withLock(`state:${workspace}`, async () => {
         const send = (statusCode, value) => {
           res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
           res.end(JSON.stringify(value))
+        }
+        // 面板静态文件（iframe 指向 /personal-memory/brain/panel/index.html）
+        if (pathname === '/brain/panel' || pathname.startsWith('/brain/panel/')) {
+          if (servePanel(req, res, pathname)) return
         }
         const key = `${req.method} ${pathname}`
         const route = routes[key]
@@ -3008,6 +3260,16 @@ export function apply(ctx, rawConfig) {
   /** sessionId -> 已经处理过的用户消息 id */
   const handled = new Map()
   const cache = createCache(cfg)
+  // 脑图控制器：笔记 + 会话回合都在这一份库里；面板与召回共用。
+  const brain = cfg.brain?.enabled === false
+    ? null
+    : createBrain({
+        getConfig: () => cfg.brain ?? {},
+        resolveWorkspace: () => resolveWorkspace(ctx, cfg),
+        log: (entry) => {
+          void writeLog(cfg, { at: new Date().toISOString(), event: 'brain', ...entry })
+        },
+      })
 
   async function preStep(payload, next) {
     const decision = await next()
@@ -3056,6 +3318,7 @@ export function apply(ctx, rawConfig) {
     const startedAt = Date.now()
     let hits = []
     let usedChars = 0
+    let brainRows = []
     try {
       const seen = alreadyInjected(agent?.session)
       const quota = cfg.perSessionDocLimit - seen.size
@@ -3065,17 +3328,30 @@ export function apply(ctx, rawConfig) {
         .filter((hit) => hit && typeof hit.text === 'string' && hit.score >= cfg.threshold && !seen.has(hit.docId))
         .sort((a, b) => b.score - a.score)
 
+      // 脑图扩散：向量种子沿边扩散 2~3 跳，note×1.0 / episode×0.6，
+      // 之后与上面的检索结果按 alpha/beta 融合——仍然只注入一块。
+      if (brain) {
+        try {
+          brainRows = brain.recall(query, { ...(cfg.brain ?? {}), sessionId }).rows ?? []
+        } catch (error) {
+          if (cfg.debug) {
+            await writeLog(cfg, { at: new Date().toISOString(), event: 'brain-recall-failed', session: sessionId, error: String(error?.message ?? error) })
+          }
+        }
+      }
+      const candidates = fuseRecallHits(ranked, brainRows.filter((row) => !seen.has(`brain:${row.nodeKey}`)), cfg)
+
       const picked = []
       const claimed = new Set()
       let budget = cfg.maxChars
-      for (const hit of ranked) {
+      for (const hit of candidates) {
         if (picked.length >= Math.min(cfg.topK, quota)) break
         if (claimed.has(hit.docId)) continue
         // 摘录长度按来源分：字面命中的句子是「他真写过的话」，值得整句留着；
         // 语义命中的只需要够认出「讲的是哪件事」，省下的预算能多装一篇。
         const limit = hit.via === 'keyword' ? cfg.excerptChars : Math.max(60, Math.round(cfg.excerptChars * cfg.semanticSnippetRatio))
         const excerpt = compact(hit.text, limit)
-        if (excerpt.length > budget) continue
+        if (!excerpt || excerpt.length > budget) continue
         budget -= excerpt.length
         claimed.add(hit.docId)
         picked.push({
@@ -3085,6 +3361,7 @@ export function apply(ctx, rawConfig) {
           score: hit.score,
           excerpt,
           path: hit.path || '',
+          nodeKind: hit.nodeKind,
         })
       }
       // 混合召回：向量只认「意思像」，查代码号/端口/股票代号这类精确词它会漏。
@@ -3165,6 +3442,7 @@ export function apply(ctx, rawConfig) {
       })),
       budget: cfg.maxChars,
       used: usedChars,
+      brain: { rows: brainRows.length, seeds: brainRows.filter((row) => row.seed).length },
       ms: Date.now() - startedAt,
     })
     // 日志之外再存一份日汇总：日志被清空，累计召回和命中率也不该归零
@@ -3185,7 +3463,7 @@ export function apply(ctx, rawConfig) {
   // Web 面板的数据接口。client 半 fetch('/personal-memory/…')。
   // 没有 webServer / effect 的环境（比如离线冒烟）直接跳过，不影响召回主流程。
   if (typeof ctx.effect === 'function' && typeof ctx.webServer?.register === 'function') {
-    ctx.effect(() => ctx.webServer.register(apiRoute(cfg, ctx, cache)), 'personal-memory: /personal-memory route')
+    ctx.effect(() => ctx.webServer.register(apiRoute(cfg, ctx, cache, brain)), 'personal-memory: /personal-memory route')
   }
 
   ctx.on('agent/pre-step', preStep, { prepend: true })
@@ -3193,6 +3471,53 @@ export function apply(ctx, rawConfig) {
     const sessionId = agent?.session?.header?.id ?? agent?.id
     if (sessionId) handled.delete(sessionId)
   })
+
+  // 脑图后台任务：启动后建/补索引 + 扫会话 + 巩固；之后按 scanMinutes 增量扫会话。
+  // 放在 setTimeout 里，插件加载不阻塞宿主启动。
+  if (brain) {
+    const warm = () => {
+      try {
+        const index = brain.ensureIndexed(false)
+        const ingest = cfg.brain.ingestSessions === false
+          ? { skipped: 'config' }
+          : brain.ingestSessions({ maxFiles: cfg.brain.maxSessionFiles })
+        const consolidation = brain.consolidate({ limit: cfg.brain.consolidateLimit })
+        void writeLog(cfg, {
+          at: new Date().toISOString(),
+          event: 'brain-ready',
+          notes: index?.nodes ?? 0,
+          edges: index?.edges ?? 0,
+          sessions: ingest?.episodes ?? 0,
+          consolidated: consolidation?.created ?? 0,
+          counts: brain.counts(),
+        })
+      } catch (error) {
+        void writeLog(cfg, { at: new Date().toISOString(), event: 'brain-boot-failed', error: String(error?.message ?? error) })
+      }
+    }
+    const bootTimer = setTimeout(warm, 1200)
+    if (typeof bootTimer?.unref === 'function') bootTimer.unref()
+    const scanMinutes = Number(cfg.brain.scanMinutes)
+    let scanTimer = null
+    if (scanMinutes > 0 && cfg.brain.ingestSessions !== false) {
+      scanTimer = setInterval(() => {
+        try {
+          brain.ingestSessions({ maxFiles: cfg.brain.maxSessionFiles })
+        } catch {
+          /* 后台扫描失败不影响召回 */
+        }
+      }, scanMinutes * 60000)
+      if (typeof scanTimer?.unref === 'function') scanTimer.unref()
+    }
+    if (typeof ctx.effect === 'function') {
+      ctx.effect(() => () => {
+        clearTimeout(bootTimer)
+        if (scanTimer) clearInterval(scanTimer)
+        brain.close()
+      }, 'personal-memory: brain background tasks')
+    }
+  }
 }
 
+export { readConfig }
 export default { name, inject, apply }

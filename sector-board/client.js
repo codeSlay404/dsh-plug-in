@@ -7,8 +7,9 @@
  *
  * v1.1: five sections — 总览 / 龙虎榜 / 游资 / 板块周期 / 红利.
  */
+try {
 window.__ModuleLoader__.load({
-  id: '@local/sector-board',
+  id: 'dsh-sector-board',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -1925,7 +1926,7 @@ window.__ModuleLoader__.load({
         },
       },
         h('iframe', {
-          src: '/api/sector-board/v3/ui-v3.html',
+          src: '/api/sector-board/v3/ui-v3.html?v=3.13.2',
           title: '股票分析',
           style: { display: 'block', flex: 1, minHeight: 0, width: '100%', border: 0, background: 'var(--dsw-alias-bg-base)' },
         }))
@@ -2132,3 +2133,6 @@ window.__ModuleLoader__.load({
     }
   },
 })
+} catch (err) {
+  console.error('[sector-board] client module registration failed', err)
+}

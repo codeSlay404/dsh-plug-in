@@ -11,18 +11,32 @@
 //   import { boot } from './harness.mjs'
 //   const { parts, hostCall, settle, expand, collect, styles, t } = await boot({ workspace })
 
-import { mkdirSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { existsSync, mkdirSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// 真实工作区：优先环境变量；没给就退回「插件目录往上两层」（本仓库就是工作区的 project/ 下），
+// 这样 npm run check 不需要先 export 一个变量。
+function guessRealWorkspace() {
+  const fromEnv = process.env.DSH_MEMORY_WORKSPACE
+  if (fromEnv) return fromEnv
+  const parent = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+  return existsSync(join(parent, 'personal')) && existsSync(join(parent, 'memory')) ? parent : undefined
+}
+const REAL_WORKSPACE = guessRealWorkspace()
 
 import { apply } from './index.js'
 
 export async function boot(options = {}) {
   // 默认值必须是「报错」而不是真实工作区：忘了传 workspace 的测试脚本一旦写盘，
-  // 就会写进 /Users/mars/sly（2026-11-22 的 smoke 事故就是这么来的）。
+  // 就会写进某个真实工作区（2026-11-22 的 smoke 事故就是这么来的）。
   if (!options.workspace && options.realWorkspace !== true) {
     throw new Error('boot() 必须显式传 workspace（临时目录）；确实要读真实工作区请传 realWorkspace: true')
   }
-  const workspace = resolve(options.workspace ?? '/Users/mars/sly')
+  if (options.realWorkspace === true && !options.workspace && !REAL_WORKSPACE) {
+    throw new Error('读取真实工作区要显式指定：boot({ realWorkspace: true, workspace }) 或设置环境变量 DSH_MEMORY_WORKSPACE')
+  }
+  const workspace = resolve(options.workspace ?? REAL_WORKSPACE ?? process.cwd())
 
   /* ---------------- 1. 宿主半：注册 /personal-memory 路由 ---------------- */
   const captured = {}
@@ -34,8 +48,8 @@ export async function boot(options = {}) {
     workspaceRegistry: { list() { return [{ path: workspace }] } },
   }
   // resolveWorkspace() 的 seed 会「向上找同时有 personal/ 和 memory/ 的目录」。
-  // 临时工作区里这两个目录如果还不存在，它会一路往上找到 /Users/mars/sly ——
-  // 于是所有写操作都落到真实工作区（2026-11-22 就这么覆盖过一次 personal/关于我.md）。
+  // 临时工作区里这两个目录如果还不存在，它会一路往上找到某个上级真实工作区 ——
+  // 于是所有写操作都落到那里（2026-11-22 就这么覆盖过一次真实 personal 文件）。
   // 所以：先把三个标准目录建好，让 seed 第一跳就命中临时目录。
   for (const dir of ['personal', 'memory', 'project']) mkdirSync(join(workspace, dir), { recursive: true })
 
@@ -159,6 +173,8 @@ export async function boot(options = {}) {
 
   const realFetch = globalThis.fetch
   const fetchLog = []
+  // 让 settle() 知道「还有请求在飞」：异步拉数据触发的 setState 不能被当成「渲染已稳定」
+  const inflight = new Set()
   async function fakeFetch(url, init) {
     const target = String(url)
     if (!target.startsWith('/personal-memory')) {
@@ -170,11 +186,17 @@ export async function boot(options = {}) {
     const path = target.replace(/^\/personal-memory/, '')
     const method = init?.method ?? 'GET'
     const body = init?.body ? JSON.parse(init.body) : undefined
-    const value = await hostCall(method, path, body)
-    return {
-      ok: true,
-      status: 200,
-      async json() { return { ok: true, value } },
+    const ticket = {}
+    inflight.add(ticket)
+    try {
+      const value = await hostCall(method, path, body)
+      return {
+        ok: true,
+        status: 200,
+        async json() { return { ok: true, value } },
+      }
+    } finally {
+      inflight.delete(ticket)
     }
   }
 
@@ -309,15 +331,18 @@ export async function boot(options = {}) {
     return { tree, pending }
   }
 
-  async function settle(renderFn, props, passes = 12) {
+  async function settle(renderFn, props, passes = 40) {
     let tree = null
     let stable = 0
     for (let i = 0; i < passes; i += 1) {
       const out = renderOnce(renderFn, props)
       tree = out.tree
       await Promise.all(out.pending)
-      await new Promise((resolve) => setTimeout(resolve, 40))
-      if (!dirty) stable += 1
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      // 还在等宿主回话就不算稳定：数据到手后还会有一次 re-render
+      const busy = inflight.size > 0
+      if (!dirty && !busy) stable += 1
+      else stable = 0
       if (stable >= 2 && i >= 2) break
     }
     return tree

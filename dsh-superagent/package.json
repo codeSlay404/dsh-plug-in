@@ -1,7 +1,6 @@
 {
   "name": "dsh-superagent",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "A small Superagent panel in the top-left corner: chat with a lead agent that routes work to workers.",
   "exports": {
@@ -16,7 +15,8 @@
     "client.js",
     "cordis.patch.yml",
     "icon.svg",
-    "locale/*.json"
+    "locale/*.json",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
@@ -29,5 +29,22 @@
         "@deepseek-ai/dsh-client-ui-conversation"
       ]
     }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.0"
+  },
+  "keywords": [
+    "dsh-plugin"
+  ],
+  "author": "codeSlay404",
+  "homepage": "https://github.com/codeSlay404/dsh-plug-in/tree/main/dsh-superagent#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codeSlay404/dsh-plug-in.git",
+    "directory": "dsh-superagent"
+  },
+  "bugs": {
+    "url": "https://github.com/codeSlay404/dsh-plug-in/issues"
   }
 }

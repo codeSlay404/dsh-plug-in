@@ -11,6 +11,7 @@
       paper: { initial: 0, cash: 0, nav: 0, total_pnl: 0, total_pnl_pct: 0, positions_value: 0, positions: [], trades: [], decisions: [], equity: [], robot: {} },
       events: { rows: [] }, global: [], indices: [], etfs: [], hot: { rows: [], total: 0 },
       stock: null, liveIndices: null, liveUpdatedAt: null,
+      ladder: { as_of: '', days: [], today: null, phase: null, loading: false, error: '', updated_at: '' },
     };
   }
   const M = emptyModel();
@@ -96,7 +97,239 @@
     }
     return out;
   }
-  const TODAY = new Date();
+
+  /* ---------- limit-up ladder / emotion phase ---------- */
+  const LADDER_UT = '7eea3edcaed734bea9cbfc24409ed989';
+  const LADDER_CACHE = 'sb-ladder-v2:';
+  const PHASE_LABEL = { ice: '冰点', ignite: '启动', main: '主升', climax: '高潮', ebb: '退潮', repair: '修复' };
+  const PHASE_CLS = { ice: 'cold', ignite: 'accent', main: 'hot', climax: 'hot', ebb: 'warn', repair: '' };
+
+  async function mapLimit(items, limit, fn) {
+    const out = new Array(items.length);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (cursor < items.length) {
+        const i = cursor++;
+        out[i] = await fn(items[i], i);
+      }
+    });
+    await Promise.all(workers);
+    return out;
+  }
+
+  function ladderCacheRead(asof) {
+    try {
+      const raw = localStorage.getItem(LADDER_CACHE + asof);
+      if (!raw) return null;
+      const obj = JSON.parse(raw);
+      if (!obj || !Array.isArray(obj.days) || !obj.days.length) return null;
+      if (Date.now() - (obj.ts || 0) > 20 * 60 * 1000) return null;
+      return obj;
+    } catch { return null; }
+  }
+  function ladderCacheWrite(asof, days) {
+    try { localStorage.setItem(LADDER_CACHE + asof, JSON.stringify({ ts: Date.now(), days })); } catch { /* quota / privacy */ }
+  }
+
+  function ladderDayFromJson(date, data) {
+    if (!data || !Array.isArray(data.pool) || !data.pool.length) return null;
+    const pool = data.pool.map((x) => ({
+      code: String(x.c || ''), name: x.n || '', pct: num(x.zdp),
+      lbc: Number(x.lbc) || 0, industry: x.hybk || '', amount: num(x.amount),
+      first: x.fbt || null, last: x.lbt || null,
+    })).filter((x) => /^\d{6}$/.test(x.code));
+    if (!pool.length) return null;
+    const counts = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    let max = 0;
+    for (const x of pool) {
+      if (x.lbc >= 5) counts[5] += 1; else if (x.lbc >= 1) counts[x.lbc] += 1;
+      if (x.lbc > max) max = x.lbc;
+    }
+    const lu = pool.length;
+    const first = counts[1];
+    return { date, lu, first, ge2: lu - first, max, counts, pool, codes: pool.map((x) => x.code) };
+  }
+
+  function ladderMetrics(days) {
+    for (let i = 0; i < days.length; i++) {
+      const d = days[i], prev = days[i - 1];
+      if (!prev) { d.promo = null; continue; }
+      const prevCodes = new Set(prev.codes || []);
+      const cont = (d.codes || []).filter((c) => prevCodes.has(c)).length;
+      d.promo = prevCodes.size ? cont / prevCodes.size : null;
+    }
+    return days;
+  }
+
+  function rawEmotionPhase(d, prev) {
+    if (!d) return 'ice';
+    if (d.lu <= 20) return 'ice';
+    if (d.ge2 >= 50 || d.first >= 180 || d.max >= 10) return 'climax';
+    if (d.max >= 7 && d.ge2 >= 18 && d.promo != null && d.promo >= 0.25) return 'main';
+    if ((prev && d.ge2 - prev.ge2 >= 3 && d.ge2 >= 8) || (d.max >= 5 && d.promo != null && d.promo >= 0.18)) return 'ignite';
+    if (d.promo != null && d.promo < 0.15 && prev && (prev.ge2 >= 10 || prev.lu >= 60)) return 'ebb';
+    if (d.lu < 35 && d.ge2 <= 8) return 'ice';
+    return 'repair';
+  }
+
+  function emotionPhase(days) {
+    if (!days.length) return null;
+    const raw = days.map((d, i) => rawEmotionPhase(d, days[i - 1]));
+    const confirmed = [];
+    for (let i = 0; i < raw.length; i++) {
+      if (i === 0) confirmed.push(raw[0]);
+      else if (raw[i] === raw[i - 1]) confirmed.push(raw[i]);
+      else confirmed.push(confirmed[i - 1]);
+    }
+    let stage = confirmed[confirmed.length - 1];
+    let duration = 1;
+    for (let i = confirmed.length - 2; i >= 0 && confirmed[i] === stage; i--) duration += 1;
+    const last = days[days.length - 1];
+    const weak = M.market.total ? M.market.down / M.market.total > 0.8 : false;
+    const vetoed = weak && ['ignite', 'main', 'climax'].includes(stage);
+    if (vetoed) stage = 'ebb';
+    return {
+      stage, raw: raw[raw.length - 1], duration, vetoed, weak,
+      label: PHASE_LABEL[stage] || stage, cls: PHASE_CLS[stage] || '',
+      date: last.date, lu: last.lu, first: last.first, ge2: last.ge2, max: last.max,
+      promo: last.promo, counts: last.counts, pool: last.pool,
+    };
+  }
+
+  function mainlineRows(n = 4) {
+    return (M.concepts || [])
+      .filter((c) => c && c.name && num(c.avg_pct) != null && (c.count || 0) >= 5)
+      .map((c) => {
+        const count = c.count || 1;
+        const upRatio = (c.up || 0) / count;
+        const luRatio = (c.limit_up || 0) / count;
+        const score = (c.avg_pct || 0) * 10 + upRatio * 30 + luRatio * 60;
+        const lead = (c.peers || [])[0];
+        return { ...c, upRatio, score, lead };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, n);
+  }
+
+  async function fetchLadder(force = false) {
+    if (M.ladder.loading) return;
+    const asof = String(M.meta.as_of || '').slice(0, 10);
+    if (!asof) return;
+    if (!force && M.ladder.days && M.ladder.days.length && M.ladder.as_of === asof) return;
+    const cached = force ? null : ladderCacheRead(asof);
+    if (cached) {
+      M.ladder = { ...M.ladder, as_of: asof, days: cached.days, today: cached.days[cached.days.length - 1], phase: emotionPhase(cached.days), loading: false, error: '', updated_at: new Date(cached.ts).toISOString() };
+      refreshCurrent();
+      return;
+    }
+    M.ladder = { ...M.ladder, loading: true, error: '', as_of: asof };
+    refreshCurrent();
+    try {
+      if (!canFetchApi()) throw new Error('静态预览无法读取连板数据');
+      const dates = businessDays(new Date(`${asof}T00:00:00`), 20).filter((d) => d <= asof);
+      const results = await mapLimit(dates, 5, async (date) => {
+        const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = ctl ? setTimeout(() => ctl.abort(), 10000) : null;
+        try {
+          const url = `https://push2ex.eastmoney.com/getTopicZTPool?ut=${LADDER_UT}&dpt=wz.ztzt&Pageindex=0&pagesize=1000&sort=fbt%3Aasc&date=${date.replace(/-/g, '')}`;
+          const r = await fetch(url, { cache: 'no-store', signal: ctl ? ctl.signal : undefined });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const j = await r.json();
+          return ladderDayFromJson(date, j && j.data);
+        } catch { return null; } finally { if (timer) clearTimeout(timer); }
+      });
+      const days = ladderMetrics(results.filter(Boolean));
+      if (!days.length) throw new Error('连板数据为空');
+      const today = days[days.length - 1];
+      M.ladder = { as_of: asof, days, today, phase: emotionPhase(days), loading: false, error: '', updated_at: new Date().toISOString() };
+      ladderCacheWrite(asof, days);
+    } catch (err) {
+      M.ladder = { ...M.ladder, loading: false, error: String(err && err.message ? err.message : err) };
+    } finally {
+      refreshCurrent();
+    }
+  }
+
+  function healthStrip() {
+    const stale = staleInfo();
+    const asof = String(M.meta.as_of || '').slice(0, 10) || '—';
+    const gen = M.meta.generated_at ? clockText(M.meta.generated_at) : '—';
+    const cov = LIVE.coverage == null ? null : Math.round(LIVE.coverage * 100);
+    const liveTxt = LIVE.source === 'api' ? `${cov == null ? '—' : `${cov}%`} · ${clockText(LIVE.updated_at)}` : LIVE.source === 'error' ? '接口不可用' : '读取中';
+    const ladder = M.ladder || {};
+    const ladderTxt = ladder.loading ? '读取中' : ladder.error ? '不可用' : ladder.today ? `${ladder.today.date} · ${ladder.today.lu} 只` : '待读取';
+    const members = FULL && FULL.codes ? FULL.codes.length : null;
+    const item = (k, v, ok, note) => `<span class="health-item"><i class="health-dot ${ok ? 'ok' : 'warn'}"></i><span><b>${esc(k)}</b> ${esc(v)}${note ? `<em>${esc(note)}</em>` : ''}</span></span>`;
+    return `<div class="health-strip">
+      ${item('ETL 快照', `${asof} ${gen}`, !stale, stale ? '滞后' : '每日')}
+      ${item('全市场行情', liveTxt, LIVE.source === 'api' && (cov == null || cov >= 99), cov != null && cov < 99 ? '部分覆盖' : '15 秒')}
+      ${item('连板梯队', ladderTxt, !!ladder.today && !ladder.error, ladder.days ? `${ladder.days.length} 日样本` : '东财')}
+      ${item('成员表', members ? `${nf(members)} 只` : '未加载', !!members, FULL ? '本地' : '')}
+    </div>`;
+  }
+
+  function phaseCard() {
+    const L = M.ladder || {};
+    const p = L.phase;
+    if (L.loading) return `<section class="card phase-card"><div class="card-h"><h2>市场阶段</h2><span class="meta">连板模型</span></div><div class="empty">正在读取涨停池与连板梯队…</div></section>`;
+    if (L.error) return `<section class="card phase-card"><div class="card-h"><h2>市场阶段</h2><span class="meta">连板模型</span></div><div class="empty">连板数据不可用：${esc(L.error)}<br><button class="btn tiny" data-action="ladder">重试</button></div></section>`;
+    if (!p) return `<section class="card phase-card"><div class="card-h"><h2>市场阶段</h2><span class="meta">连板模型</span></div><div class="empty">等待连板数据。</div></section>`;
+    const counts = p.counts || {};
+    const pool = p.pool || [];
+    const byBoard = (n) => pool.filter((x) => (n === 5 ? x.lbc >= 5 : x.lbc === n)).slice(0, 4);
+    const ladderRow = (n, label) => {
+      const arr = byBoard(n);
+      if (!arr.length) return '';
+      return `<div class="ladder-row"><span class="lb">${label}</span><div class="ladder-names">${arr.map((x) => `<span data-stock="${esc(x.code)}">${esc(x.name)}<em>${esc(x.industry || '')}</em></span>`).join('')}</div><b>${counts[n] || arr.length}</b></div>`;
+    };
+    const main = mainlineRows(4);
+    const mainTitle = main.length && num(main[0].avg_pct) >= 0 ? '今日主线 · 概念' : '今日相对强势 · 概念';
+    const promoTxt = p.promo == null ? '—' : `${Math.round(p.promo * 100)}%`;
+    return `<section class="card phase-card">
+      <div class="card-h"><h2>市场阶段</h2><span class="meta">连板模型 · 东财 · ${L.days.length} 日</span></div>
+      <div class="phase-head">
+        <span class="phase-badge ${p.cls}">${esc(p.label)}</span>
+        <div class="phase-copy"><b>${esc(p.label)} · 第 ${p.duration} 天</b><small>${esc(p.date)} · 原始 ${esc(PHASE_LABEL[p.raw] || p.raw)}${p.vetoed ? ' · 弱档否决' : ''}</small></div>
+      </div>
+      <div class="phase-metrics">
+        <span><b>${nf(p.lu)}</b><em>涨停</em></span>
+        <span><b>${nf(p.ge2)}</b><em>连板</em></span>
+        <span><b>${nf(p.max)}</b><em>最高板</em></span>
+        <span><b>${promoTxt}</b><em>晋级率</em></span>
+      </div>
+      <div class="ladder-bars">
+        ${[1, 2, 3, 4, 5].map((n) => `<div class="ladder-bar"><span>${n === 5 ? '5+' : n} 板</span><i style="width:${Math.max(4, ((counts[n] || 0) / Math.max(1, p.lu)) * 100)}%"></i><b>${counts[n] || 0}</b></div>`).join('')}
+      </div>
+      <div class="ladder-list">${ladderRow(5, '5板+')}${ladderRow(4, '4板')}${ladderRow(3, '3板')}${ladderRow(2, '2板')}${ladderRow(1, '首板')}</div>
+      <div class="mainline">
+        <div class="rank-sep">${mainTitle}</div>
+        ${main.map((c, i) => `<div class="mainline-row" data-stock="${c.lead ? esc(c.lead.code) : ''}"><span class="idx">${i + 1}</span><span class="nm">${esc(c.name)}</span><span class="why">${c.count} 只 · ${Math.round(c.upRatio * 100)}% 上涨 · 涨停 ${c.limit_up || 0}</span><span class="pct up">${pt(c.avg_pct)}</span></div>`).join('')}
+      </div>
+    </section>`;
+  }
+
+  function auctionRows() {
+    const phase = marketPhase();
+    if (phase.label !== '集合竞价') return [];
+    const indexSet = new Set(Object.values(INDEX_CODE));
+    return (LIVE.rows || [])
+      .filter((r) => r && /^\d{6}$/.test(code6(r.code)) && !indexSet.has(canonRow(r.code)) && num(r.pct) != null)
+      .filter((r) => Math.abs(r.pct) >= 3 || (num(r.amount) || 0) >= 5000)
+      .sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct))
+      .slice(0, 8)
+      .map((r) => ({ ...r, tag: r.pct >= 5 ? '高开' : r.pct <= -3 ? '低开' : '放量' }));
+  }
+
+  function auctionCard() {
+    const phase = marketPhase();
+    const rows = auctionRows();
+    const body = phase.label !== '集合竞价'
+      ? `<div class="live-empty"><b>当前${esc(phase.label)}，不在竞价时段。</b><br>下一交易日 09:15–09:25 自动扫描：高开 ≥5%、低开 ≤-3%、成交额 ≥5000 万。</div>`
+      : rows.length
+        ? rows.map((r) => `<div class="auction-row" data-stock="${esc(r.code)}"><span class="tag ${r.tag === '低开' ? 'cold' : 'hot'}">${r.tag}</span><span class="who"><b>${esc(r.name || r.code)}</b><small>${esc(r.code)}</small></span><span class="pct ${cls(r.pct)}">${pt(r.pct)}</span><span class="amt">${money((r.amount || 0) * 1e4)}</span></div>`).join('')
+        : `<div class="live-empty">竞价扫描已开启，本轮没有触发阈值。</div>`;
+    return `<section class="card auction-card"><div class="card-h"><h2>竞价异动</h2><span class="meta">09:15–09:25 · 高开/低开/放量</span></div>${body}</section>`;
+  }
 
   /* ---------- live API helpers ---------- */
   function apiAvailable() {
@@ -265,6 +498,20 @@
     '国防军工': [['512660', '军工ETF']],
     '汽车': [['516110', '汽车ETF']],
     '家用电器': [['159996', '家电ETF']],
+  };
+
+  /* 业务纯度优先的代表股：避免按市值排序把比亚迪、格力、核电等混进光伏/半导体/机器人。 */
+  const THEME_LEADERS = {
+    '半导体': ['688981', '002371', '688041', '688256', '688012', '603986'],
+    'CPO/光模块': ['300308', '300502', '300394', '002281', '603083', '000988'],
+    '机器人': ['300124', '002747', '688017', '300607', '300024', '002050'],
+    '猪肉': ['002714', '300498', '000876', '002124', '002567', '603477'],
+    '影视': ['002739', '300251', '600977', '300133', '001330', '601595'],
+    '光伏': ['601012', '600438', '300274', '002459', '688599', '603806'],
+    '电池': ['300750', '300014', '002074', '300207', '300450', '002812'],
+    '房地产': ['600048', '000002', '001979', '600383', '002244', '600325'],
+    '有色金属': ['601899', '603993', '600547', '601600', '000807', '000630'],
+    '稀土永磁': ['600111', '000831', '300748', '600392', '600259', '600366'],
   };
 
   /* 政策样本：用于展示“周期板块也要看政策”，不是实时政策库。 */
@@ -490,6 +737,7 @@
     [...M.lhb.rows, ...M.youzi.stocks].forEach((x) => addIndex(map, { code: x.code, name: x.name, type: '股票', sub: '龙虎榜', price: null, pct: x.pct }, 1));
     [...M.decision.leaders, ...M.decision.risks].forEach((x) => addIndex(map, { code: x.code, name: x.name, type: '股票', sub: x.industry, price: x.price, pct: x.pct, industry: x.industry, mcap: x.mcap }, 2));
     M.paper.positions.forEach((p) => addIndex(map, { code: p.code, name: p.name, type: '股票', sub: '模拟盘持仓', price: p.price, pct: p.pct }, 2));
+    M.dividend.rows.forEach((d) => addIndex(map, { code: d.code, name: d.name, type: '股票', sub: '红利策略', price: d.price, pct: d.pct }, 1));
     M.etfs.forEach((e) => addIndex(map, { code: `E:${e.code}`, name: e.name, type: 'ETF', sub: e.cat, etfCode: e.code, price: e.price, pct: e.pct }, 2));
     state.index = [...map.values()];
   }
@@ -529,6 +777,8 @@
     error: '',
     busy: false,
     timer: null,
+    coverage: null,
+    failedChunks: 0,
   };
 
   function code6(v) {
@@ -698,13 +948,20 @@
       const settled = await Promise.allSettled(chunks.map((c) => jget('live.json?codes=' + c.join(','))));
       const rows = [], events = [];
       let updated = null;
+      let failed = 0;
       for (const r of settled) {
-        if (r.status !== 'fulfilled' || !r.value || !Array.isArray(r.value.rows)) continue;
+        if (r.status !== 'fulfilled' || !r.value || !Array.isArray(r.value.rows)) { failed += 1; continue; }
         rows.push(...r.value.rows);
         if (Array.isArray(r.value.events)) events.push(...r.value.events);
         if (r.value.updated_at) updated = r.value.updated_at;
       }
       if (!rows.length) throw new Error('全市场行情为空');
+      const stockSet = new Set((FULL.codes || []).map(code6).filter(Boolean));
+      const covered = new Set(rows
+        .filter((r) => num(r.pct) != null)
+        .map((r) => code6(r.code))
+        .filter((c) => stockSet.has(c)));
+      const coverage = stockSet.size ? covered.size / stockSet.size : null;
       LIVE.rows = rows;
       LIVE.byCode = new Map(rows.map((r) => [canonRow(r.code), r]).filter(([c]) => c));
       const seen = new Set();
@@ -716,11 +973,15 @@
       LIVE.updated_at = updated || new Date().toISOString();
       LIVE.source = 'api';
       LIVE.error = '';
+      LIVE.coverage = coverage;
+      LIVE.failedChunks = failed;
       patchLiveQuotes();
       applyFullMarket(rows);
       M.liveFullAt = LIVE.updated_at;
     } catch (err) {
       LIVE.error = String(err && err.message ? err.message : err);
+      LIVE.coverage = null;
+      LIVE.failedChunks = 0;
       if (!LIVE.rows.length) {
         LIVE.byCode = new Map(); LIVE.events = []; LIVE.updated_at = null; LIVE.source = 'error';
       }
@@ -811,17 +1072,24 @@
   }
 
   /* ---------- common render ---------- */
+  function liveCoverageNote() {
+    if (LIVE.source !== 'api' || LIVE.coverage == null) return '';
+    const pct = Math.round(LIVE.coverage * 100);
+    if (pct >= 99 && !LIVE.failedChunks) return '';
+    return ` · 覆盖 ${pct}%${LIVE.failedChunks ? `（${LIVE.failedChunks} 批失败）` : ''}`;
+  }
   function renderRibbon() {
     const list = (M.liveIndices && M.liveIndices.length ? M.liveIndices : M.indices).slice(0, 7);
     const phase = marketPhase();
+    const cov = liveCoverageNote();
     const asof = !M.meta.as_of
       ? '读取中…'
       : (M.liveUpdatedAt
-        ? `${String(M.meta.as_of).slice(5)} 分析 · ${phase.open ? `行情 ${clockText(M.liveUpdatedAt).slice(0, 8)}` : phase.label}`
+        ? `${String(M.meta.as_of).slice(5)} 分析 · ${phase.open ? `行情 ${clockText(M.liveUpdatedAt).slice(0, 8)}` : phase.label}${cov}`
         : `${M.meta.as_of} 收盘 · 实盘快照`);
     $('#ribbon').innerHTML = list
       .map((i) => `<div class="idx"><span>${esc(i.name)}</span><b>${nf(i.value, 2)}</b><b class="${cls(i.pct)}">${pt(i.pct)}</b></div>`)
-      .join('') + `<div class="stamp" title="价格/指数/市场宽度/板块与概念均涨每 15 秒；技术信号与周期阶段来自每日 ETL 收盘快照">${esc(asof)}</div>`;
+      .join('') + `<div class="stamp" title="价格/指数/市场宽度/板块与概念均涨每 15 秒；技术信号与周期阶段来自每日 ETL 收盘快照${cov ? `；当前${cov.slice(3)}，市场宽度可能偏小` : ''}">${esc(asof)}</div>`;
   }
 
   function paperDay() {
@@ -942,6 +1210,7 @@
       if (state.tab === 'live') renderLive(); else go(state.tab);
       startLive();
       startAux();
+      if (!M.ladder.days.length && !M.ladder.loading) fetchLadder();
       return true;
     }).catch((err) => {
       M.meta.ready = false;
@@ -975,7 +1244,8 @@
     const parts = String(dateStr).split('-').map(Number);
     if (parts.length !== 3 || parts.some((x) => !isFinite(x))) return null;
     const d = Date.UTC(parts[0], parts[1] - 1, parts[2]);
-    const base = Date.UTC(TODAY.getFullYear(), TODAY.getMonth(), TODAY.getDate());
+    const now = new Date();
+    const base = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
     return Math.round((d - base) / 86400000);
   }
 
@@ -1106,7 +1376,7 @@
       '分化，先看结构。';
     const contrast = idx && num(idx.pct) != null && num(idx.pct) >= 0 ? '但 ' : '';
     const liveK = M.liveUpdatedAt
-      ? ` · ${marketPhase().open ? `行情 ${clockText(M.liveUpdatedAt).slice(0, 5)}` : marketPhase().label}`
+      ? ` · ${marketPhase().open ? `行情 ${clockText(M.liveUpdatedAt).slice(0, 5)}` : marketPhase().label}${liveCoverageNote()}`
       : '';
     const lede = `${idx ? `${idx.name} ${pt(idx.pct)}，` : ''}${contrast}${nf(m.down)} 只下跌、中位 ${pt(m.median_pct)}。` +
       (tops[0] ? `${tops[0].name} ${pt(tops[0].avg_pct)} ${tops[0].avg_pct >= 0 ? '领涨' : '相对抗跌'}` : '') +
@@ -1140,6 +1410,7 @@
         <div><b>${M.signals && M.signals.plunge != null ? nf(M.signals.plunge) : '—'}</b><span>近 20 日大跌</span></div>
         <div><b>${maBull == null ? '—' : nf(maBull)} / ${maBear == null ? '—' : nf(maBear)}</b><span>日线 MA 多头 / 空头</span></div>
       </div>
+      ${healthStrip()}
 
       <div class="today-grid">
         <div class="stack">
@@ -1184,6 +1455,7 @@
         </div>
 
         <div class="stack">
+          ${phaseCard()}
           <section class="card">
             <div class="card-h"><h2>板块红黑榜</h2><span class="meta">${sectorsUp}/${sectorsAll} 上涨 · 各取 8 · <a href="#" data-go="sectors">全部 →</a></span></div>
             <div class="rank-sep">领涨</div>
@@ -1278,6 +1550,15 @@
   }
   function themeStock(t, n = 1) {
     const list = t.stocks || [];
+    const codes = THEME_LEADERS[t.name] || [];
+    if (codes.length) {
+      const picked = [];
+      for (const code of codes) {
+        const s = list.find((x) => x.code === code) || state.index.find((x) => x.code === code);
+        if (s) picked.push(s);
+      }
+      if (picked.length) return picked.slice(0, n);
+    }
     return list.slice(0, n);
   }
 
@@ -1294,7 +1575,7 @@
     $('#page-sectors').innerHTML = `
       <div class="page-head">
         <div>
-          <div class="kicker">板块与周期${cadence('全市场 15 秒 · 分析每日', 'live')}</div>
+          <div class="kicker">板块与周期${cadence('全市场 15 秒 · 分析每日', 'live')}${liveCoverageNote()}</div>
           <h1>谁在涨，谁在出清。</h1>
           <p class="lede">先看今天谁强，再看小周期 / 大周期位置。点一行，右侧给出 ETF、龙头股和出清逻辑。猪周期看母猪，光伏看硅料价格——每个板块有自己的先行指标。</p>
         </div>
@@ -1314,7 +1595,7 @@
                 <th class="r">今日</th>
                 ${isTheme ? '<th class="hide-720">5 日</th><th>小周期</th><th>大周期</th>' : '<th class="r">涨 / 跌</th><th class="r hide-720">涨停</th><th class="r hide-720">大跌</th>'}
                 <th>状态</th>
-                <th class="hide-720">领涨</th>
+                <th class="hide-720">${isTheme ? '龙头' : '领涨'}</th>
               </tr></thead>
               <tbody>
                 ${isTheme ? themes.map((t) => {
@@ -1358,7 +1639,10 @@
     if (!list.length) return `<div class="empty">暂无对应 ETF</div>`;
     return list.map(([code, name]) => {
       const e = M.etfs.find((x) => x.code === code);
-      return `<div class="etf-row"><div><div>${esc(name)}</div><div class="code">${esc(code)}</div></div>${e ? `<div class="num ${cls(e.pct)}">${pt(e.pct)}</div>` : '<div class="etf-hint">示例</div>'}</div>`;
+      return `<div class="etf-row" data-etf="${esc(code)}" role="button" tabindex="0" aria-label="查看 ${esc(name)} 持仓">
+        <div><div>${esc(name)}</div><div class="code">${esc(code)}</div></div>
+        <div class="etf-side">${e ? `<span class="num ${cls(e.pct)}">${pt(e.pct)}</span>` : '<span class="flat">—</span>'}<span class="etf-arrow">持仓 →</span></div>
+      </div>`;
     }).join('');
   }
   function policyBlock(name) {
@@ -1383,7 +1667,8 @@
     const st = themeState(t);
     const opp = themeOpportunity(t);
     const notes = NOTES[t.name] || { what: '', cycle: '', clear: '', watch: [] };
-    const lead = themeStock(t, 1)[0];
+    const leads = themeStock(t, 6);
+    const lead = leads[0];
     return `<div class="detail-pad">
       <div class="detail-kicker">${esc(t.group || '周期主题')} · ${t.count ? `${t.count} 只成分` : '暂无 A 股成分'} · 均涨实时 · 周期每日</div>
       <div class="detail-title"><h2>${esc(t.name)}</h2><span class="tag ${st.cls}">${st.label}</span></div>
@@ -1414,11 +1699,11 @@
 
       ${policyBlock(t.name)}
 
-      <div class="section-mini">相关 ETF <span class="tag" style="font-size:9px">示例</span></div>
+      <div class="section-mini">相关 ETF <span class="tag" style="font-size:9px">点开看持仓</span></div>
       ${etfRows(t.name)}
 
-      <div class="section-mini">龙头股</div>
-      ${stockRows(t.stocks, 6)}
+      <div class="section-mini">龙头股 <span class="tag" style="font-size:9px">按业务纯度</span></div>
+      ${stockRows(leads, 6)}
       <div class="drawer-actions"><button class="btn" data-stock="${lead ? esc(lead.code) : ''}">看龙头技术面</button><button class="btn ghost" data-toast="已在现有插件中保留全部成分股">全部成分</button></div>
     </div>`;
   }
@@ -1445,7 +1730,7 @@
         <li>${esc(notes.clear || '行业级出清指标尚未接入；建议切换到周期主题，看库存、价格和产能。')}</li>
       </ol>
 
-      <div class="section-mini">相关 ETF <span class="tag" style="font-size:9px">示例</span></div>
+      <div class="section-mini">相关 ETF <span class="tag" style="font-size:9px">点开看持仓</span></div>
       ${etfRows(s.name)}
 
       <div class="section-mini">今日信号股 <span class="tag" style="font-size:9px">按涨幅</span></div>
@@ -1456,7 +1741,7 @@
 
   /* ---------- stock drawer ---------- */
   function getStock(code) {
-    const item = state.index.find((x) => x.code === code);
+    const item = state.index.find((x) => x.code === code || x.etfCode === code);
     if (!item) return null;
     return {
       code: item.etfCode || item.code,
@@ -1530,10 +1815,50 @@
     </div>`;
   }
 
+  async function fetchEtfHoldings(code) {
+    if (!apiAvailable()) throw new Error('无法连接 Host 接口');
+    const url = `https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition?FCODE=${encodeURIComponent(code)}&deviceid=1&plat=Android&product=EFund&version=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error(`持仓接口 HTTP ${res.status}`);
+    const d = await res.json();
+    const stocks = d && d.Datas && d.Datas.fundStocks;
+    if (!d || !d.Success || !Array.isArray(stocks) || !stocks.length) {
+      throw new Error((d && (d.ErrMsg || d.Message)) || '暂无持仓数据');
+    }
+    return {
+      as_of: d.Expansion || '',
+      source: '天天基金',
+      holdings: stocks.slice(0, 10).map((x) => ({
+        code: String(x.GPDM || '').padStart(6, '0'),
+        name: x.GPJC || '',
+        weight: Number.isFinite(Number(x.JZBL)) ? Number(x.JZBL) : null,
+        change: Number.isFinite(Number(x.PCTNVCHG)) ? Number(x.PCTNVCHG) : null,
+        change_type: x.PCTNVCHGTYPE || '',
+        industry: x.INDEXNAME || '',
+      })).filter((x) => /^\d{6}$/.test(x.code)),
+    };
+  }
+
+  function etfHoldingsBlock(s) {
+    if (s.holdingsLoading) return `<div class="read-block"><h3>前十大持仓</h3><p>正在读取基金持仓…</p></div>`;
+    if (s.holdingsError) return `<div class="read-block"><h3>前十大持仓</h3><p>持仓加载失败：${esc(s.holdingsError)}</p></div>`;
+    const h = s.holdings;
+    if (!h || !h.holdings || !h.holdings.length) return `<div class="read-block"><h3>前十大持仓</h3><p>暂无持仓数据。</p></div>`;
+    const max = Math.max(...h.holdings.map((x) => x.weight || 0), 1);
+    return `<div class="read-block"><h3>前十大持仓 <span style="font-weight:400;color:var(--text-3)">截至 ${esc(h.as_of || '—')} · ${esc(h.source || '天天基金')}</span></h3>
+      <div class="hold-list">${h.holdings.map((x) => `<div class="hold-row" data-stock="${esc(x.code)}">
+        <div class="hold-name"><b>${esc(x.name)}</b><small>${esc(x.code)}${x.industry ? ` · ${esc(x.industry)}` : ''}</small></div>
+        <div class="hold-bar"><i style="width:${Math.max(3, (x.weight || 0) / max * 100)}%"></i></div>
+        <b class="num">${x.weight == null ? '—' : x.weight.toFixed(2) + '%'}</b>
+      </div>`).join('')}</div>
+      <p class="hold-note">ETF 披露的前十大持仓，非全部；权重为基金资产净值占比。点击个股可看行情。</p>
+    </div>`;
+  }
+
   async function openStock(code) {
     const s = getStock(code);
     if (!s) return toast('没有找到这只股票');
-    state.stock = { ...s, annLoading: !s.isEtf, announcements: [], annError: '' };
+    state.stock = { ...s, annLoading: !s.isEtf, announcements: [], annError: '', holdingsLoading: !!s.isEtf, holdings: null, holdingsError: '' };
     state.period = s.isEtf ? 'intraday' : 'day';
     renderDrawer();
     $('#mask').classList.add('on');
@@ -1547,20 +1872,25 @@
     const annP = s.isEtf
       ? Promise.resolve([])
       : fetchAnnouncements(s.code).catch((err) => ({ error: String(err && err.message ? err.message : err) }));
+    const holdP = s.isEtf
+      ? fetchEtfHoldings(s.code).catch((err) => ({ error: String(err && err.message ? err.message : err) }))
+      : Promise.resolve(null);
     try {
-      const live = await fetchStock(s.code, s);
-      const ann = await annP;
+      const [live, ann, hold] = await Promise.all([fetchStock(s.code, s), annP, holdP]);
       if (state.stock && state.stock.code === s.code) {
         state.stock = {
           ...(live || { ...s, loading: false, error: '个股接口返回为空' }),
           announcements: Array.isArray(ann) ? ann : [],
           annLoading: false,
           annError: ann && ann.error ? ann.error : '',
+          holdings: hold && hold.holdings ? hold : null,
+          holdingsLoading: false,
+          holdingsError: hold && hold.error ? hold.error : '',
         };
         renderDrawer();
       }
     } catch (err) {
-      const ann = await annP;
+      const [ann, hold] = await Promise.all([annP, holdP]);
       if (state.stock && state.stock.code === s.code) {
         state.stock = {
           ...s,
@@ -1569,6 +1899,9 @@
           announcements: Array.isArray(ann) ? ann : [],
           annLoading: false,
           annError: ann && ann.error ? ann.error : '',
+          holdings: hold && hold.holdings ? hold : null,
+          holdingsLoading: false,
+          holdingsError: hold && hold.error ? hold.error : '',
         };
         renderDrawer();
       }
@@ -1592,7 +1925,7 @@
       <div class="drawer-head">
         <div class="who">
           <div class="nm"><h2>${esc(s.name)}</h2><span>${esc(s.code)}</span></div>
-          <div class="px"><b class="${pctCls}">${s.price == null ? '—' : nf(s.price, s.price < 10 ? 3 : 2)}</b><span class="${pctCls}">${pt(s.pct)}</span><span style="color:var(--text-3);font-size:10.5px">${esc(s.industry || s.sub || '')}</span></div>
+          <div class="px"><b class="${pctCls}">${s.price == null ? '—' : nf(s.price, s.price < 10 ? 3 : 2)}</b><span class="${pctCls}">${pt(s.pct)}</span><span style="color:var(--text-3);font-size:10.5px">${esc(s.isEtf ? 'ETF' : (s.industry || s.sub || ''))}</span></div>
         </div>
         <button class="x" id="closeDrawer" aria-label="关闭">✕</button>
       </div>
@@ -1610,7 +1943,9 @@
       </div>
       <div class="chart-box">${loading || s.error ? `<div class="drawer-state">${loading ? '正在读取真实日线 / 分时…' : `行情加载失败：${esc(s.error)}`}</div>` : '<svg id="stockChart" viewBox="0 0 760 410" preserveAspectRatio="xMidYMid meet"></svg>'}</div>
       <div class="drawer-body">
-        ${loading ? `<div class="read-block"><h3>正在读取</h3><p>请求 /api/sector-board/stock.json；返回前不生成假 K 线。</p></div>` : s.error ? `<div class="read-block"><h3>无法加载</h3><p>${esc(s.error)}。请关闭后重试，或检查 Host 服务。</p></div>` : (s.isEtf ? `<div class="read-block"><h3>ETF 说明</h3><p>这是 ${esc(s.name)}（${esc(s.code)}）的行情概览。ETF 的技术指标应看跟踪指数；个股 MACD / 均线分析请在股票上使用。</p></div>` : stockRead(s))}
+        ${loading ? `<div class="read-block"><h3>正在读取</h3><p>请求 /api/sector-board/stock.json；返回前不生成假 K 线。</p></div>` : s.error ? `<div class="read-block"><h3>无法加载</h3><p>${esc(s.error)}。请关闭后重试，或检查 Host 服务。</p></div>` : (s.isEtf ? '' : stockRead(s))}
+        ${s.isEtf ? etfHoldingsBlock(s) : ''}
+        ${s.isEtf ? `<div class="read-block"><h3>ETF 说明</h3><p>这是 ${esc(s.name)}（${esc(s.code)}）的行情概览。ETF 的技术指标应看跟踪指数；个股 MACD / 均线分析请在股票上使用。</p></div>` : ''}
         ${annBlock(s)}
         <div class="drawer-actions"><button class="btn primary" data-toast="自选功能待接入">加入自选</button><button class="btn" data-toast="完整行情来自 Host stock.json">查看完整行情</button></div>
       </div>
@@ -1835,7 +2170,12 @@
     const pd = paperDay();
     const lastDate = pd.last.date;
     const todaysTrades = (P.trades || []).filter((t) => t.date === lastDate);
-    const decision = (P.decisions || [])[(P.decisions || []).length - 1];
+    const decisions = [...(P.decisions || [])].sort((a, b) => String(b.at || b.date).localeCompare(String(a.at || a.date)));
+    const decision = decisions[0];
+    const recentTrades = [...(P.trades || [])]
+      .sort((a, b) => String(b.at || b.date).localeCompare(String(a.at || a.date)))
+      .slice(0, 5);
+    const updatedAt = P.updated_at ? String(P.updated_at).slice(0, 16).replace('T', ' ') : '—';
     const eq = P.equity || [];
     const rows = [];
     for (let i = eq.length - 1; i >= Math.max(1, eq.length - 10); i--) {
@@ -1855,9 +2195,9 @@
         <div>
           <div class="kicker">模拟盘 · 每日交易成果${cadence('净值 10 秒 · 决策每日 14:50')}</div>
           <h1>${esc(paperTitle)}</h1>
-          <p class="lede">${esc(lastDate)} 收盘净值 ${nf(pd.last.equity, 2)}，当日 ${pt(pd.pct)}，累计 ${pt(M.paper.total_pnl_pct)}。${decision ? `最近决策 ${esc(decision.action)}（${esc(decision.date)}）。` : ''}机器人最近运行 ${esc(lastRun)}；只做模拟，不接实时下单。</p>
+          <p class="lede">${esc(lastDate)} 收盘净值 ${nf(pd.last.equity, 2)}，当日 ${pt(pd.pct)}，累计 ${pt(M.paper.total_pnl_pct)}。${decision ? `最近决策 ${esc(decision.action)}（${esc(decision.date)} ${esc(String(decision.at || '').slice(11, 16))}）。` : ''}机器人最近运行 ${esc(lastRun)}；账本更新 ${esc(updatedAt)}；只做模拟，不接实时下单。</p>
         </div>
-        <div class="head-actions"><button class="btn" data-toast="模拟盘不接实时下单">交易记录</button><button class="btn primary" data-toast="机器人将在工作日 14:50 运行">运行决策</button></div>
+        <div class="head-actions"><button class="btn" data-toast="模拟盘不接实时下单">交易记录</button><button class="btn primary" data-toast="机器人每个交易日 14:50 自动运行；此页只读展示">决策规则</button></div>
       </div>
 
       <div class="kpis">
@@ -1899,8 +2239,8 @@
             </div>
           </section>
           <section class="card">
-            <div class="card-h"><h2>最近成交</h2><span class="meta">最近 ${Math.min(5, M.paper.trades.length)} 笔 · ${esc(lastDate)} ${todaysTrades.length} 笔</span></div>
-            ${M.paper.trades.slice(-5).reverse().map((t) => `<div class="money-row" data-stock="${esc(t.code)}"><span class="src">${t.side === 'buy' ? '买入' : '卖出'}</span><span class="who">${esc(t.name)} <small>${nf(t.qty)} 股</small></span><span class="val">${nf(t.amount, 2)}</span></div>`).join('') || '<div class="empty" style="padding:14px 20px">暂无成交</div>'}
+            <div class="card-h"><h2>最近成交</h2><span class="meta">最近 ${Math.min(5, M.paper.trades.length)} 笔 · ${esc(lastDate)} ${todaysTrades.length} 笔 · 更新 ${esc(updatedAt)}</span></div>
+            ${recentTrades.map((t) => `<div class="money-row" data-stock="${esc(t.code)}"><span class="src">${t.side === 'buy' ? '买入' : '卖出'}</span><span class="who">${esc(t.name)} <small>${nf(t.qty)} 股</small></span><span class="val">${nf(t.amount, 2)}</span></div>`).join('') || '<div class="empty" style="padding:14px 20px">暂无成交</div>'}
           </section>
           <section class="card">
             <div class="card-h"><h2>规则</h2></div>
@@ -2119,7 +2459,9 @@
     const error = LIVE.source === 'error';
     const isApi = LIVE.source === 'api';
     const liveOn = phase.open && isApi;
-    const sourceText = error ? '接口不可用' : isApi ? '实时接口' : '读取中';
+    const coveragePct = isApi && LIVE.coverage != null ? Math.round(LIVE.coverage * 100) : null;
+    const partial = isApi && (LIVE.failedChunks > 0 || (coveragePct != null && coveragePct < 99));
+    const sourceText = error ? '接口不可用' : isApi ? `实时接口${partial ? ` · ${coveragePct}%` : ''}` : '读取中';
     const updated = isApi ? clockText(LIVE.updated_at) : '—';
     let topPct = null;
     let topSpeed = null;
@@ -2168,14 +2510,18 @@
         <span>${liveOn ? '15 秒后自动刷新' : (phase.open ? '等待实时接口' : '恢复时间 下一交易日 09:15')}</span>
         <span class="spacer"></span>
         <span>监控池 <b>${rows.length}</b> 只</span>
+        ${partial ? `<span>覆盖 <b>${coveragePct}%</b>${LIVE.failedChunks ? ` · ${LIVE.failedChunks} 批失败` : ''}</span>` : ''}
         <span class="live-src ${error ? 'error' : isApi ? 'api' : 'loading'}">${sourceText}</span>
       </div>
 
       ${error ? `<div class="live-notice err"><b>实时接口不可用：</b>${esc(LIVE.error || '请求失败')}。不会伪造数据；请检查 Host 服务后点「手动刷新」。</div>` : ''}
       ${loading ? `<div class="live-notice"><b>正在读取：</b>实时接口返回前，本页保持空态。</div>` : ''}
+      ${partial ? `<div class="live-notice"><b>行情覆盖不足：</b>本次只拿到 ${coveragePct}% 的股票行情${LIVE.failedChunks ? `，${LIVE.failedChunks} 批请求失败` : ''}。市场宽度和板块均涨只统计已返回的股票，可能偏小；请稍后手动刷新。</div>` : ''}
+
+      ${auctionCard()}
 
       <div class="live-kpis">
-        <div><b>${rows.length}</b><span>监控池</span><em>主题 / 决策 / 人气 / 持仓</em></div>
+        <div><b>${rows.length}</b><span>监控池</span><em>${partial ? `覆盖 ${coveragePct}%` : '主题 / 决策 / 人气 / 持仓'}</em></div>
         <div><b class="up">${up}</b><span>上涨</span><em class="down">${down} 只下跌</em></div>
         <div><b>${events.length}</b><span>异动</span><em>2 分钟去重</em></div>
         <div><b class="${topPct ? cls(topPct.pct) : 'flat'}">${topPct ? pt(topPct.pct) : '—'}</b><span>最大涨幅</span><em>${esc(topPct ? topPct.name : '—')}</em></div>
@@ -2399,6 +2745,8 @@
         renderSectors();
         return;
       }
+      const etf = e.target.closest('[data-etf]');
+      if (etf && etf.dataset.etf) { openStock(etf.dataset.etf); return; }
       const learnDay = e.target.closest('[data-learn-day]');
       if (learnDay) {
         state.learnDay = Number(learnDay.dataset.learnDay) || 1;
@@ -2462,6 +2810,8 @@
           hydrate(true);
         } else if (action.dataset.action === 'etl') {
           triggerRefresh();
+        } else if (action.dataset.action === 'ladder') {
+          M.ladder.days = []; M.ladder.as_of = ''; fetchLadder(true);
         }
         return;
       }

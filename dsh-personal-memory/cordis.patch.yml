@@ -39,3 +39,15 @@
         quickNote: true
         # 速记落盘后自动重建 contextdb 索引
         autoReindex: true
+        # ---- 脑图（lib/brain，面板「🧠 脑图」页） ----
+        # 节点来自 personal/ 与 memory/ 的小节；ingestSessions 打开后会话 turn 也入库
+        brain:
+          enabled: true
+          ingestSessions: true
+          # 召回融合权重：ctx 检索 alpha + 脑图扩散 beta（两者各自归一到 0..1）
+          alpha: 0.7
+          beta: 0.3
+          # 会话节点在召回里打 0.6 折，笔记是 1.0
+          episodeWeight: 0.6
+          # 边扫描间隔（分钟），0 = 只在启动时扫一次
+          scanMinutes: 10

@@ -64,6 +64,7 @@ const workspace = status.json?.value?.workspace ?? ''
 check('/status 认出工作区', workspace.endsWith('sly'), workspace)
 const counts = status.json?.value?.counts ?? {}
 check('/status 数得出笔记', Number(counts.personal) > 0, JSON.stringify(counts))
+check('/status 的未完成有「按件」口径且不多于按条', Number.isFinite(Number(counts.openTodosDistinct)) && Number(counts.openTodosDistinct) <= Number(counts.openTodos), JSON.stringify({ rows: counts.openTodos, items: counts.openTodosDistinct }))
 
 const tree = await get(port, '/tree?scope=personal,memory,project')
 const docs = tree.json?.value?.docs ?? []
@@ -110,6 +111,15 @@ const audit = await get(port, '/audit')
 const auditValue = audit.json?.value ?? {}
 check('/audit 体检可用', audit.status === 200 && typeof auditValue.counts?.total === 'number', `notes=${auditValue.notes} issues=${auditValue.counts?.total}`)
 check('/audit 默认只看 personal', (auditValue.topics ?? []).every((topic) => String(topic).startsWith('personal')), (auditValue.topics ?? []).join(' '))
+
+// 索引坏了在面板上长得像「本来就没记录」：检索空、统计 0。
+// 所以这里直接钉住「有日志却统计为 0」这个组合——它只可能是读取窗口/连接坏了。
+const logLines = Number(status.json?.value?.logLines ?? 0)
+const statsValue = status.json?.value?.stats ?? {}
+check('日志有内容时统计不能全 0', logLines < 50 || (Number(statsValue.recalls) || 0) > 0,
+  `logLines=${logLines} recalls=${statsValue.recalls} hits=${statsValue.hits}`)
+const indexInfo = status.json?.value?.index ?? {}
+check('索引文件不是空壳', Number(indexInfo.bytes) > 1024 * 1024, `bytes=${indexInfo.bytes} ready=${indexInfo.ready}`)
 
 const debug = await get(port, '/debug/client')
 const mentions = debug.json?.value?.mentions ?? {}

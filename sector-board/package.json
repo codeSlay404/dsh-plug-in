@@ -1,7 +1,6 @@
 {
-  "name": "@local/sector-board",
+  "name": "dsh-sector-board",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
   "description": "股票分析：A股板块、盘中异动、主题研究与模拟盘",
   "exports": {
@@ -20,8 +19,12 @@
     "cordis.patch.yml",
     "icon.svg",
     "README.md",
-    "docs",
-    "announcements.py"
+    "announcements.py",
+    "LICENSE",
+    "docs/ui-v3.html",
+    "docs/assets/ui-v3.css",
+    "docs/assets/ui-v3.js",
+    "docs/assets/universe-data.js"
   ],
   "dsh": {
     "bundle": {
@@ -36,5 +39,27 @@
         "@deepseek-ai/dsh-client-locale"
       ]
     }
+  },
+  "scripts": {
+    "test": "node tests/data-contract.mjs && node tests/ui-e2e.mjs",
+    "test:data": "node tests/data-contract.mjs",
+    "test:ui": "node tests/ui-e2e.mjs"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.0"
+  },
+  "keywords": [
+    "dsh-plugin"
+  ],
+  "author": "codeSlay404",
+  "homepage": "https://github.com/codeSlay404/dsh-plug-in/tree/main/sector-board#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codeSlay404/dsh-plug-in.git",
+    "directory": "sector-board"
+  },
+  "bugs": {
+    "url": "https://github.com/codeSlay404/dsh-plug-in/issues"
   }
 }

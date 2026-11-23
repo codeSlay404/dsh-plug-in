@@ -131,7 +131,7 @@ function parseArgs(argv) {
   return args
 }
 
-const { parts, t, settle, reset, hostCall, styles: panelStyles } = await boot({ realWorkspace: true })
+const { parts, t, settle, reset, hostCall, styles: panelStyles } = await boot({ realWorkspace: true, workspace: process.env.DSH_MEMORY_WORKSPACE })
 
 async function renderPage({ tab, theme, width, height, extra = {} }) {
   globalThis.__pmViewportWidth = width  // 让 useNarrow() 和 CSS 媒体查询用同一个宽度

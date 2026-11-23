@@ -138,6 +138,8 @@ window.__ModuleLoader__.load({
 .pmp-ym{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;height:34px;padding:0;border:1px solid ${C.border};border-radius:5px;background:transparent;color:${C.muted};font:inherit;font-size:9.5px;line-height:1;cursor:pointer}
 .pmp-ym.on{color:${C.text};border-color:transparent}
 .pmp-ym:hover{border-color:${C.borderStrong}}
+.pmp-ym.off{border-style:dashed;opacity:.55;cursor:default}
+.pmp-ym.off:hover{border-color:${C.border}}
 .pmp-ym-m{font-weight:600}
 .pmp-ym-n{font-size:8.5px;opacity:.75;font-variant-numeric:tabular-nums}
 .pmp-tl-m{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;padding:10px 6px 6px;font-size:10.5px;font-weight:600;color:${C.muted};background:${C.surface};font-variant-numeric:tabular-nums}
@@ -534,12 +536,31 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
 @keyframes pmp-spin{to{transform:rotate(360deg)}}
 .pmp-fade{animation:pmp-fade .14s ease-out}
 @keyframes pmp-fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+/* 脑图页：顶部一条筛选条 + 占满剩余高度的 iframe（3D 页自己滚动/缩放） */
+.pmp-brain-bar{display:flex;align-items:center;gap:8px;padding:9px 16px;flex:none;border-bottom:1px solid ${C.border};flex-wrap:wrap}
+.pmp-brain-title{font-size:12.5px;font-weight:600;margin-right:4px}
+.pmp-brain-filter.on{background:${C.accentSoft};border-color:${C.accent};color:${C.accent}}
+.pmp-brain-frame{flex:1;width:100%;min-height:420px;border:0;border-radius:10px;background:${C.surface};margin:10px 16px 14px;width:calc(100% - 32px)}
+.pmp-brain-head{display:flex;flex-direction:column;flex:1;min-height:0}
 `
 
     /* ------------------------------------------------------------------ *
      * 小工具
      * ------------------------------------------------------------------ */
     const num = (v) => Number(v) || 0
+
+    // 状态条上的待办计数：件＝去重后的事数，条＝未勾的行数。
+    // 抽成纯函数是为了能直接单测格式规则（渲染树里塞假 counts 会被真实数据覆盖）。
+    const todoCountValue = (counts) => {
+      const total = Number(counts?.openTodos) || 0
+      const distinct = Number(counts?.openTodosDistinct)
+      return Number.isFinite(distinct) && distinct < total ? distinct : total
+    }
+    const todoCountExtra = (counts, t) => {
+      const total = Number(counts?.openTodos) || 0
+      const distinct = Number(counts?.openTodosDistinct)
+      return Number.isFinite(distinct) && distinct < total ? ` ${t('meta.todosItem')} / ${num(total)} ${t('meta.todosRow')}` : ''
+    }
     const pad2 = (n) => String(n).padStart(2, '0')
 
     function fmtDate(iso) {
@@ -820,6 +841,7 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       resolveClue(text, resolved) { return this.call('POST', '/clue/resolve', { text, resolved }, 15000) }
 
       reindex() { return this.call('POST', '/reindex', {}, 180000) }
+      repair() { return this.call('POST', '/reindex', { repair: true }, 260000) }
       note(payload) { return this.call('POST', '/note', payload, 60000) }
       todo(payload) { return this.call('POST', '/todo', payload, 20000) }
   deferTodo(payload) { return this.call('POST', '/todo/defer', payload, 20000) }
@@ -1320,14 +1342,17 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
             const style = cell.recorded > 0
               ? { background: `color-mix(in srgb, ${C.accent} ${Math.round(18 + cell.ratio * 62)}%, transparent)` }
               : undefined
+            const empty = cell.recorded === 0
             return h('button', {
               type: 'button',
               key: cell.month,
-              className: `pmp-ym${cell.recorded > 0 ? ' on' : ''}`,
-              // 强度用 accent 的透明度表达：记满的月份最深，空格子只有描边
+              className: `pmp-ym${cell.recorded > 0 ? ' on' : ''}${empty ? ' off' : ''}`,
+              // 强度用 accent 的透明度表达：记满的月份最深，空格子只有虚线框
               style,
-              title: `${cell.month} · ${t('tl.yearCell').replace('{n}', String(cell.recorded))}`,
-              onClick: () => (typeof onPickMonth === 'function' ? onPickMonth(`month:${cell.month}`) : null),
+              // 空格子没有可跳的目标，就别做成按钮：点了没反应比看起来点不动更糟
+              disabled: empty,
+              title: empty ? `${cell.month} · ${t('tl.yearEmpty')}` : `${cell.month} · ${t('tl.yearCell').replace('{n}', String(cell.recorded))}${t('tl.yearGo')}`,
+              onClick: empty ? undefined : () => (typeof onPickMonth === 'function' ? onPickMonth(`month:${cell.month}`) : null),
             },
               h('span', { className: 'pmp-ym-m' }, String(cell.mon)),
               h('span', { className: 'pmp-ym-n' }, cell.recorded > 0 ? String(cell.recorded) : ''))
@@ -1553,6 +1578,23 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       ]
     }
 
+    // 同一件事被抄进好几天的「未完成」里：一条条数会把 5 件事数成 20 条待办
+    function dupBadge(t, item) {
+      const count = Number(item.dupCount) || 0
+      if (count < 2) return null
+      const dates = Array.isArray(item.dupDates) ? item.dupDates : []
+      const hint = t('todo.dupHint').replace('{d}', dates.map((date) => String(date).slice(5)).join('、'))
+      return h('span', { className: 'pmp-badge mute', title: hint }, t('todo.dupCount').replace('{n}', count))
+    }
+
+    // 带日期的一次性动作过了那天就没意义了；标出来，但不由代码替人勾掉
+    function expiredBadge(t, item) {
+      if (item.expired !== true) return null
+      const days = Number(item.expiredDays) || 0
+      const hint = t('todo.expiredHint').replace('{d}', String(item.expiredOn ?? ''))
+      return h('span', { className: 'pmp-badge warn', title: hint }, t('todo.expired').replace('{n}', String(days)))
+    }
+
     function MasterToday(props) {
       const { t, timeline, docs = [], status, selected, onOpen, onToggleTodo, onDeferTodo, onNote, onQuickTodo, waits = {}, nexts = {}, onWait, onEditNext, onOpenDone } = props
       const days = timeline?.days ?? []
@@ -1577,7 +1619,21 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
             else carriedRows.push(row)
           }
         }
-        return { fresh: freshRows, carried: carriedRows }
+        return { fresh: freshRows, carried: carriedRows }        // 同一件事在好几天的「未完成」里重抄过：今天页只留最近那一条，
+        // 否则「今天该做的」8 条里 5 条是同一件旧事的不同日期版本。
+        const dedupe = (rows) => {
+          const seen = new Set()
+          const out = []
+          for (const row of rows) {
+            const key = row.dupKey
+            if (key && seen.has(key)) continue
+            if (key) seen.add(key)
+            out.push(row)
+          }
+          return out
+        }
+        return { fresh: dedupe(freshRows), carried: dedupe(carriedRows) }
+
       }, [days, todayKey])
       const OWED_LIMIT = 8
       // 首屏只铺 8 条（4 条今天的 + 补满），剩下的就地展开——跳页会丢掉「我现在在哪」的上下文
@@ -1685,6 +1741,8 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
               : null,
             daysSince(item.date) >= 7 ? h('span', { className: 'pmp-badge warn' }, t('todo.stale')) : null,
             movedBadge(t, item),
+            dupBadge(t, item),
+            expiredBadge(t, item),
           ),
         ),
         h('button', {
@@ -1916,6 +1974,8 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       const [waitOnly, setWaitOnly] = useState(props.initialWaitOnly === true)
       // 一直往后推的事和「本周才冒出来的事」不是一回事：挪过 2 次以上的单独能筛
       const [movedOnly, setMovedOnly] = useState(props.initialMovedOnly === true)
+      // 过了日期的一次性动作：单独能看，免得和「真欠着的」混在一屏
+      const [expiredOnly, setExpiredOnly] = useState(props.initialExpiredOnly === true)
       // 「这条是哪天为什么加的」——勾之前人常想看一眼出处，跳页太重
       const [ctxOpen, setCtxOpen] = useState({})
       const toggleCtx = (key) => setCtxOpen((prev) => ({ ...prev, [key]: prev[key] !== true }))
@@ -1935,11 +1995,27 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
             const kind = waitKind(raw, item.wait)
             if (waitOnly && !kind) continue
             if (movedOnly && (Number(item.movedCount) || 0) < 2) continue
-            out.push({ path: day.path, date: day.date, weekday: day.weekday ?? '', line: item.line, text: item.text, section: item.section, age, preview: day.preview ?? '', kind, waitDays: Number(item.waitDays) || 0, next: item.next ?? null, movedCount: Number(item.movedCount) || 0, movedFrom: item.movedFrom ?? null, movedSteps: Array.isArray(item.movedSteps) ? item.movedSteps : [] })
+            if (expiredOnly && item.expired !== true) continue
+            out.push({ path: day.path, date: day.date, weekday: day.weekday ?? '', line: item.line, text: item.text, section: item.section, age, preview: day.preview ?? '', kind, waitDays: Number(item.waitDays) || 0, next: item.next ?? null, movedCount: Number(item.movedCount) || 0, movedFrom: item.movedFrom ?? null, movedSteps: Array.isArray(item.movedSteps) ? item.movedSteps : [], dupKey: item.dupKey ?? null, dupCount: Number(item.dupCount) || 0, dupDates: Array.isArray(item.dupDates) ? item.dupDates : [], expired: item.expired === true, expiredOn: item.expiredOn ?? null, expiredDays: Number(item.expiredDays) || 0 })
           }
         }
         return out
-      }, [timeline, filter, ageMin, waitOnly, movedOnly, waits])
+      }, [timeline, filter, ageMin, waitOnly, movedOnly, expiredOnly, waits])
+
+      // 默认只留同一件事最近的那一条：40 行里有一半是「昨天那句又抄了一遍」
+      const [showDup, setShowDup] = useState(props.initialShowDup === true)
+      const dupTotal = items.filter((item) => item.dupCount >= 2).length
+      const shown = useMemo(() => {
+        if (showDup) return items
+        const seen = new Set()
+        const out = []
+        for (const item of items) {
+          if (item.dupKey && seen.has(item.dupKey)) continue
+          if (item.dupKey) seen.add(item.dupKey)
+          out.push(item)
+        }
+        return out
+      }, [items, showDup])
 
       // 预览/深链接用：直接展开第一条的「那天写了什么」（宿主不传）
       const firstKey = items.length > 0 ? `${items[0].path}:${items[0].line}` : null
@@ -1955,14 +2031,14 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
         ]
         const list = defs
           .map((def) => {
-            const rows = items.filter((item) => def.test(item.age))
+            const rows = shown.filter((item) => def.test(item.age))
             // 档头除了件数，再给「最久的那条欠了几天」——36 条里哪些是真旧账，一件件点看不清
             return { ...def, rows, oldest: rows.reduce((max, item) => Math.max(max, Number(item.age) || 0), 0) }
           })
           .filter((bucket) => bucket.rows.length > 0)
         // 只在「全部」时分组；选了具体天数就是在找一个窗口，不用再分三层
         return ageMin === 0 ? list : list.map((bucket, index) => ({ ...bucket, flat: true, key: `${bucket.key}-${index}` }))
-      }, [items, ageMin, t])
+      }, [shown, ageMin, t])
 
       // 「变成行动」不是终点：先问一句下一步是什么，回车才真的落地
       const [actingKey, setActingKey] = useState(props.initialActing ?? null)
@@ -2008,6 +2084,7 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
 
       // 「挪过 2 次以上」有几条：有才显示筛选 chip（偶尔挪一次不算问题）
       const movedCountTotal = items.filter((item) => item.movedCount >= 2).length
+      const expiredTotal = items.filter((item) => item.expired === true).length
       const total = items.length
 
       return h('div', { className: 'pmp-master' },
@@ -2020,7 +2097,25 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
           }),
           h('div', { className: 'pmp-chips-row' },
             h('span', { className: 'pmp-badge mute', style: { marginRight: 'auto', alignSelf: 'center' } },
-              `${total} ${t('meta.todos')}`),
+              dupTotal > 0 && !showDup
+                ? t('todo.countCollapsed').replace('{a}', String(shown.length)).replace('{b}', String(total))
+                : `${total} ${t('meta.todos')}`),
+            expiredTotal > 0
+              ? h('button', {
+                type: 'button',
+                className: `pmp-chipb${expiredOnly ? ' on' : ''}`,
+                title: t('todo.expiredOnlyHint'),
+                onClick: () => setExpiredOnly((open) => !open),
+              }, t('todo.expiredOnly').replace('{n}', String(expiredTotal)))
+              : null,
+            dupTotal > 0
+              ? h('button', {
+                type: 'button',
+                className: `pmp-chipb${showDup ? ' on' : ''}`,
+                title: t('todo.dupShowHint'),
+                onClick: () => setShowDup((open) => !open),
+              }, showDup ? t('todo.dupHide') : t('todo.dupShow').replace('{n}', String(total - shown.length)))
+              : null,
             h('button', {
               type: 'button',
               className: `pmp-chipb${waitOnly ? ' on' : ''}`,
@@ -2143,6 +2238,8 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
                     h('span', null, item.date),
                     item.age >= 7 ? h('span', { className: 'pmp-badge warn' }, `${item.age} ${t('todo.days')}`) : null,
                     movedBadge(t, item, { open: mvOpen[`${item.path}#${item.line}`] === true, onToggle: () => toggleMv(`${item.path}#${item.line}`) }),
+                    dupBadge(t, item),
+                    expiredBadge(t, item),
                   ),
                 ),
                 h('button', {
@@ -3328,6 +3425,7 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       const [testing, setTesting] = useState(false)
       const [testError, setTestError] = useState('')
       const [reindexing, setReindexing] = useState(false)
+      const [repairArm, setRepairArm] = useState('')
 
       const runTest = async (override, trialOverride) => {
         const text = (typeof override === 'string' ? override : query).trim()
@@ -3359,12 +3457,23 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
         void runTest(initialTest)
       }, [initialTest])
 
-      const runReindex = async () => {
+      // repair=true：库已经坏了才用。索引是派生物，删掉不丢笔记；旧库会挪到 ctx.db.broken-<时间>。
+      const runReindex = async (repair) => {
         if (reindexing) return
+        if (repair && repairArm !== 'yes') {
+          setRepairArm('yes')
+          onToast(t('recall.repairArm'))
+          return
+        }
         setReindexing(true)
+        setRepairArm('')
         try {
-          await api.reindex()
-          onToast(t('recall.reindexed'))
+          const value = repair ? await api.repair() : await api.reindex()
+          if (repair) {
+            onToast(t('recall.repaired').replace('{n}', String(num(value.files))))
+          } else {
+            onToast(t('recall.reindexed'))
+          }
           await onReload(true)
         } catch (err) {
           onToast(String(err?.message ?? err), true)
@@ -3418,8 +3527,15 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
               type: 'button',
               className: 'pmp-btn sm',
               disabled: reindexing,
-              onClick: () => void runReindex(),
+              onClick: () => void runReindex(false),
             }, reindexing ? h('span', null, h(Spinner), ' ', t('recall.reindexing')) : t('recall.reindex')),
+            h('button', {
+              type: 'button',
+              className: `pmp-btn sm ghost${repairArm ? ' warn' : ''}`,
+              disabled: reindexing,
+              title: t('recall.repairHint'),
+              onClick: () => void runReindex(true),
+            }, repairArm ? t('recall.repairConfirm') : t('recall.repair')),
           ),
           h('div', { style: { fontSize: '11.5px', color: C.muted, marginBottom: '8px' } }, t('recall.tryHint')),
           h('div', { style: { display: 'flex', gap: '8px' } },
@@ -3948,6 +4064,49 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
     /* ------------------------------------------------------------------ *
      * 整页面板
      * ------------------------------------------------------------------ */
+    /**
+     * 脑图页：iframe 直接加载插件自带的 3D 脑图（与面板同一套数据，宿主侧是
+     * /personal-memory/brain/panel/index.html）。筛选走 URL 参数 —— 换参数即换一张图，
+     * 不需要面板 JS 跟 iframe 之间做 postMessage 协议。
+     */
+    function BrainTab(props) {
+      const { t } = props
+      const [kind, setKind] = useState(props.initialKind ?? 'all')
+      const [nonce, setNonce] = useState(0)
+      const [failed, setFailed] = useState(false)
+      const src = `/personal-memory/brain/panel/index.html?kind=${encodeURIComponent(kind)}&n=${nonce}`
+      const filters = [
+        ['all', t('brain.filter.all')],
+        ['note', t('brain.filter.note')],
+        ['episode', t('brain.filter.episode')],
+      ]
+      return h('div', { className: 'pmp-brain-head' },
+        h('div', { className: 'pmp-brain-bar' },
+          h('span', { className: 'pmp-brain-title' }, t('tab.brain')),
+          ...filters.map(([key, label]) => h('button', {
+            key,
+            type: 'button',
+            className: `pmp-btn pmp-brain-filter${kind === key ? ' on' : ''}`,
+            onClick: () => setKind(key),
+          }, label)),
+          h('span', { style: { flex: 1, minWidth: 8 } }),
+          failed ? h('span', { style: { color: C.warn, fontSize: 11.5 } }, t('brain.fallback')) : null,
+          h('button', {
+            type: 'button',
+            className: 'pmp-btn',
+            onClick: () => { setFailed(false); setNonce((n) => n + 1) },
+          }, t('brain.reload')),
+        ),
+        h('iframe', {
+          className: 'pmp-brain-frame',
+          src,
+          title: t('tab.brain'),
+          key: `${kind}-${nonce}`,
+          onError: () => setFailed(true),
+        }),
+      )
+    }
+
     function App(props) {
       const { t } = props
       // props.api 只给离线预览/测试注入用；真实宿主不传，就是真路由
@@ -3974,7 +4133,7 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       const [stars, setStars] = useState([])
       const [recentQueries, setRecentQueries] = useState([])
       // 折叠偏好跟工作区走（.dsh/personal-memory/state.json），刷新页面不会又全展开
-      const [collapsed, setCollapsed] = useState({})
+      const [collapsed, setCollapsed] = useState(props.initialCollapsed && typeof props.initialCollapsed === 'object' ? props.initialCollapsed : {})
       // 预览/深链接可以指定初始排序；真实宿主不传，就走 state.json 里记住的那个
       const [todoSort, setTodoSortState] = useState(props.initialTodoSort === 'oldest' ? 'oldest' : 'fresh')
       const [noteOpen, setNoteOpen] = useState(false)
@@ -4064,7 +4223,8 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
             api.state().catch(() => null),
             typeof api.audit === 'function' ? api.audit('personal').catch(() => null) : Promise.resolve(null),
           ])
-          if (nextStatus) setStatus(nextStatus)
+          // 预览/测试给了状态就别被 reload 的实测覆盖：否则断言只能跟着真实工作区漂
+          if (nextStatus && !props.status && !props.initialStatus) setStatus(nextStatus)
           // 预览/深链接给了体检结果就别被 reload 的实测结果覆盖（否则截图永远是「通过」）
           if (nextAudit && !props.initialAudit) setAudit(nextAudit)
           if (nextState) {
@@ -4072,7 +4232,10 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
             setRecentQueries(Array.isArray(nextState.queries) ? nextState.queries : [])
             setWaits(nextState.wait && typeof nextState.wait === 'object' ? nextState.wait : {})
             setNexts(nextState.next && typeof nextState.next === 'object' ? nextState.next : {})
-            setCollapsed(nextState.ui?.collapsed && typeof nextState.ui.collapsed === 'object' ? nextState.ui.collapsed : {})
+            // 预览/测试给了初始折叠表就别被 state.json 覆盖（否则冒烟会跟着用户偏好变）
+            if (!props.initialCollapsed || typeof props.initialCollapsed !== 'object') {
+              setCollapsed(nextState.ui?.collapsed && typeof nextState.ui.collapsed === 'object' ? nextState.ui.collapsed : {})
+            }
             if (nextState.ui?.searchSort === 'recent' || nextState.ui?.searchSort === 'score') setSearchSortState(nextState.ui.searchSort)
             // 预览/深链接显式指定过排序时，别让 state.json 把它盖掉
             if (props.initialTodoSort !== 'oldest' && props.initialTodoSort !== 'fresh') {
@@ -4234,7 +4397,7 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
             ? null
             : tab === 'timeline' || tab === 'todos'
             ? latestDay
-            : tab === 'search' || tab === 'recall'
+            : tab === 'search' || tab === 'recall' || tab === 'brain'
               ? null
               : docs.find((item) => item.path === 'personal/关于我.md')?.path
                 ?? docs.find((item) => item.path === 'personal/index.md')?.path
@@ -4411,6 +4574,7 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
         ['todos', t('tab.todos')],
         ['search', t('tab.search')],
         ['recall', t('tab.recall')],
+        ['brain', t('tab.brain')],
       ]
 
       const detail = h('div', { className: 'pmp-detail' },
@@ -4488,7 +4652,11 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
           h('span', null, h('span', { className: `pmp-dot${indexReady ? ' ok' : ' bad'}` }), `${t('recall.index')} ${indexReady ? t('recall.ready') : t('recall.down')}`),
           h('span', null, `${t('meta.docs')} `, h('b', null, String(num(counts.personal) + num(counts.diaries)))),
           h('span', null, `${t('meta.entries')} `, h('b', null, String(num(counts.memoryEntries)))),
-          h('span', null, `${t('meta.todos')} `, h('b', null, String(num(counts.openTodos)))),
+          h('span', null, `${t('meta.todos')} `,
+            h('b', null, String(num(todoCountValue(counts)))),
+            todoCountExtra(counts, t)
+              ? h('span', { title: t('meta.todosSplitHint') }, todoCountExtra(counts, t))
+              : null),
           counts.lastDiary ? h('span', null, `${t('recall.latest')} `, h('b', null, String(counts.lastDiary).slice(-13, -3))) : null,
         ),
 
@@ -4523,6 +4691,8 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
                 nexts,
               }),
           )
+          : tab === 'brain'
+          ? h(BrainTab, { t, initialKind: props.initialBrainKind })
           : tab === 'recall'
           ? h('div', { className: 'pmp-body' },
             h(RecallTab, {
@@ -4555,18 +4725,31 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
                     t, timeline, docs, selected, collapsed,
                     onCollapse: toggleCollapse,
                     onOpen: (path) => void openDoc(path),
-                    // 点年份格子：既展开那个月，也把它滚到视野里（没有 DOM 的环境直接跳过）
+                    // 点年份格子：展开那个月，并把它滚进视野。
+                    // scrollIntoView 在「嵌套滚动容器」里只保证元素可见、不保证贴顶，
+                    // 所以优先自己算最近的可滚动祖先，把它挪到容器顶部下方一点。
                     onPickMonth: (key) => {
                       if (collapsed[key] === true) toggleCollapse(key)
-                      if (typeof document !== 'undefined' && typeof document.getElementById === 'function') {
-                        const node = document.getElementById(`pm-${key}`) ?? document.getElementById(key)
-                        if (node && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'start', behavior: 'smooth' })
+                      if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return
+                      const node = document.getElementById(`pm-${key}`) ?? document.getElementById(key)
+                      if (!node) return
+                      let parent = node.parentElement
+                      while (parent && parent !== document.body) {
+                        const style = typeof getComputedStyle === 'function' ? getComputedStyle(parent) : null
+                        const scrollable = style && /(auto|scroll)/.test(`${style.overflowY}`) && parent.scrollHeight > parent.clientHeight + 4
+                        if (scrollable) {
+                          const delta = node.getBoundingClientRect().top - parent.getBoundingClientRect().top
+                          parent.scrollTop = Math.max(0, parent.scrollTop + delta - 6)
+                          return
+                        }
+                        parent = parent.parentElement
                       }
+                      if (typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'start', behavior: 'smooth' })
                     },
                   })
                   : tab === 'todos'
                     ? h(MasterTodos, {
-              initialCtx: props.initialCtx, initialMvOpen: props.initialMvOpen, initialAskForRepeat: props.initialAskForRepeat, t, timeline, selected, onOpen: (path) => void openDoc(path), onToggleTodo: toggleTodo, onDeferTodo: deferTodo, waits, nexts, onWait: setWait, onEditNext: editAtNext, onPlanNext: planNext, initialActing: props.initialActing, initialActingText: props.initialActingText, initialActingDraft: props.initialActingDraft, initialWaitOnly: props.initialWaitOnly, initialMovedOnly: props.initialMovedOnly, collapsed, onCollapse: toggleCollapse })
+              initialCtx: props.initialCtx, initialMvOpen: props.initialMvOpen, initialAskForRepeat: props.initialAskForRepeat, t, timeline, selected, onOpen: (path) => void openDoc(path), onToggleTodo: toggleTodo, onDeferTodo: deferTodo, waits, nexts, onWait: setWait, onEditNext: editAtNext, onPlanNext: planNext, initialActing: props.initialActing, initialActingText: props.initialActingText, initialActingDraft: props.initialActingDraft, initialWaitOnly: props.initialWaitOnly, initialMovedOnly: props.initialMovedOnly, initialShowDup: props.initialShowDup, initialExpiredOnly: props.initialExpiredOnly, collapsed, onCollapse: toggleCollapse })
                     : h(MasterSearch, { t, selected, initialQuery: props.initialQuery ?? null, recent: recentQueries, onOpen: (path) => void openDoc(path), onOpenIn: (path, heading) => openFrom(path, heading), sort: searchSort, onSort: setSearchSort, initialStateOnly: props.initialStateOnly, initialOnlyKind: props.initialOnlyKind, initialHits: props.initialHits, initialVisited: props.initialVisited ?? null, initialClueRows: props.initialClueRows, initialClueRecent: props.initialClueRecent, initialCluePages: props.initialCluePages, initialNewClueKind: props.initialNewClueKind, seed: seedQuery, onEditAtEnd: editAtEnd,
                       onNewNoteFrom: (dir) => { setNewNoteDir(dir || 'personal'); setNewOpen(true) },
                       onSearchFor: (text) => { setTab('search'); setSeedQuery({ q: text, at: Date.now() }) } }),
@@ -4585,6 +4768,7 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
             { key: 'todos', label: t('tab.todos') },
             { key: 'search', label: t('tab.search') },
             { key: 'recall', label: t('tab.recall') },
+            { key: 'brain', label: t('tab.brain') },
           ],
           onNavigate: (key) => {
             setQuickOpen(false)
@@ -4648,7 +4832,17 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       'today.owed': '今天该做的',
       'today.sort.fresh': '今天新加的在前',
       'today.sort.oldest': '最久没动的在前',
-      'todo.ctx': '那天写了什么',
+      'todo.dupCount': '重提 {n} 次',
+    'todo.dupHint': '同一件事在 {d} 这几天的「未完成」里都出现过',
+    'todo.expired': '过期 {n} 天',
+    'todo.expiredHint': '这句里写的是 {d} 那天的事，那天已经过去了',
+    'todo.expiredOnly': '过期的 {n} 条',
+    'todo.expiredOnlyHint': '只看「日期已经过去、但还挂在这里」的一次性动作',
+    'todo.dupShow': '展开重复的 {n} 条',
+    'todo.dupHide': '收起重复',
+    'todo.dupShowHint': '把「昨天那句又抄了一遍」的重复行展开',
+    'todo.countCollapsed': '{a} 件（记录 {b} 条）',
+    'todo.ctx': '那天写了什么',
       'todo.ctxDay': '那天写了',
       'todo.ctxEmpty': '那天没写正文。',
       'todo.ctxOpen': '打开那天 →',
@@ -4660,6 +4854,8 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       'tl.touched': '改过',
       'tl.year': '今年',
       'tl.yearCell': '{n} 天',
+    'tl.yearEmpty': '这个月没有记录',
+    'tl.yearGo': ' · 点它跳到那个月',
       'today.fresh': '今天新加的',
       'today.carried': '挂着没做的',
       'today.owedEmpty': '没有晾着的待办。',
@@ -4939,6 +5135,12 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       'related.title': '相关笔记',
       'tab.search': '检索',
       'tab.recall': '召回',
+      'tab.brain': '🧠 脑图',
+      'brain.filter.all': '全部',
+      'brain.filter.note': '笔记',
+      'brain.filter.episode': '会话',
+      'brain.reload': '重载',
+      'brain.fallback': '实时图不可用，已退回演示数据',
       'act.note': '速记',
       'act.refresh': '刷新',
       'act.retry': '重试',
@@ -4948,6 +5150,9 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       'meta.days': '天',
       'meta.docs': '篇笔记',
       'meta.todos': '未完成',
+      'meta.todosItem': '件',
+      'meta.todosRow': '条',
+      'meta.todosSplitHint': '件＝同一件事只算一次（跨天重抄的合并）；条＝日记里实际有几行没勾',
       'list.filter': '筛选标题…',
       'list.root': 'personal / 根目录',
       'list.empty': '这里还没有笔记。',
@@ -4989,6 +5194,11 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       'recall.reindex': '重建索引',
       'recall.reindexing': '重建中…',
       'recall.reindexed': '索引已重建',
+      'recall.repair': '修复索引',
+      'recall.repairHint': '索引读不出来（disk I/O error、库只剩几 KB）时才用：旧库会被挪到 ctx.db.broken-<时间>，然后从笔记重建。笔记一份不动。',
+      'recall.repairArm': '再点一次「确认修复」：会重建整份索引，大约 20 秒',
+      'recall.repairConfirm': '确认修复',
+      'recall.repaired': '索引已修复（{n} 个文件）',
       'recall.recent': '最近召回',
       'recall.none': '还没有记录',
       'recall.noneWhy': '日志里已有 {n} 条记录（最早 {since}），但召回记录被清空过，所以上面几张卡是 0',
@@ -5055,7 +5265,17 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       'today.owed': 'What is owed',
       'today.sort.fresh': 'Added today first',
       'today.sort.oldest': 'Oldest first',
-      'todo.ctx': 'What that day said',
+      'todo.dupCount': 'restated x{n}',
+    'todo.dupHint': 'The same item appears in the unfinished lists of {d}',
+    'todo.expired': 'overdue {n}d',
+    'todo.expiredHint': 'This was scheduled for {d}, which has passed',
+    'todo.expiredOnly': '{n} overdue',
+    'todo.expiredOnlyHint': 'Only one-off actions whose date has passed but are still listed',
+    'todo.dupShow': 'Show {n} repeats',
+    'todo.dupHide': 'Hide repeats',
+    'todo.dupShowHint': 'Show the rows that are yesterday sentence copied again',
+    'todo.countCollapsed': '{a} items ({b} rows)',
+    'todo.ctx': 'What that day said',
       'todo.ctxDay': 'That day',
       'todo.ctxEmpty': 'Nothing written that day.',
       'todo.ctxOpen': 'Open that day →',
@@ -5067,6 +5287,8 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       'tl.touched': 'Edited',
       'tl.year': 'this year',
       'tl.yearCell': '{n} d',
+    'tl.yearEmpty': 'No entries this month',
+    'tl.yearGo': ' · click to jump to it',
       'today.fresh': 'Added today',
       'today.carried': 'Still owed',
       'today.owedEmpty': 'Nothing left hanging.',
@@ -5346,6 +5568,12 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       'related.title': 'Related notes',
       'tab.search': 'Search',
       'tab.recall': 'Recall',
+      'tab.brain': '🧠 Brain',
+      'brain.filter.all': 'All',
+      'brain.filter.note': 'Notes',
+      'brain.filter.episode': 'Sessions',
+      'brain.reload': 'Reload',
+      'brain.fallback': 'Live graph unavailable — showing demo data',
       'act.note': 'Note',
       'act.refresh': 'Refresh',
       'act.retry': 'Retry',
@@ -5354,7 +5582,10 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       'meta.entries': 'items',
       'meta.days': 'days',
       'meta.docs': 'notes',
-      'meta.todos': 'open',
+      'meta.todos': 'unfinished',
+      'meta.todosItem': 'items',
+      'meta.todosRow': 'rows',
+      'meta.todosSplitHint': 'items counts the same task once even when it is restated on several days; rows counts the literal unchecked lines',
       'list.filter': 'Filter titles…',
       'list.root': 'personal / root',
       'list.empty': 'No notes here yet.',
@@ -5393,6 +5624,11 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
       'recall.dropBudget': 'over budget',
       'recall.tryHint': 'Type a sentence and see which notes the automatic recall would pick (not written to the session).',
       'recall.run': 'Try',
+      'recall.repair': 'Repair index',
+      'recall.repairHint': 'Only when the index cannot be read at all (disk I/O error, DB shrunk to a few KB). The old DB is moved to ctx.db.broken-<time> and rebuilt from notes; not a single note is touched.',
+      'recall.repairArm': 'Click "Repair for real" again — this rebuilds the whole index (~20s)',
+      'recall.repairConfirm': 'Repair for real',
+      'recall.repaired': 'Index repaired ({n} files)',
       'recall.reindex': 'Reindex',
       'recall.reindexing': 'Reindexing…',
       'recall.reindexed': 'Index rebuilt',
@@ -5530,6 +5766,7 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
         MasterSearch,
         DocReader,
         RecallTab,
+        BrainTab,
         NoteModal,
         NewNoteModal,
         SettingsSection,
@@ -5541,6 +5778,8 @@ button.pmp-check:hover{border-color:${C.accent};background:${C.accentSoft}}
         localDateKey,
         Api,
         phraseVariants,
+        todoCountValue,
+        todoCountExtra,
       },
     }
   },

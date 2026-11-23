@@ -1,3 +1,3 @@
 - insert:
     - id: sector-board
-      name: '@local/sector-board'
+      name: 'dsh-sector-board'

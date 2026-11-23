@@ -4,11 +4,24 @@
 import { apply } from './index.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // 只读接口打在真实工作区上；写操作（/note）打在一个临时目录上，
 // 免得每次跑冒烟都往真日记里塞测试行。
-const REAL_WORKSPACE = '/Users/mars/sly'
+// 没给 DSH_MEMORY_WORKSPACE 时退回「插件目录往上两层」——也就是工作区本身，
+// 这样 `npm run check` 一条命令就能跑完，不需要先 export 一个变量。
+function guessWorkspace() {
+  const fromEnv = process.env.DSH_MEMORY_WORKSPACE
+  if (fromEnv) return fromEnv
+  const parent = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+  return existsSync(join(parent, 'personal')) && existsSync(join(parent, 'memory')) ? parent : ''
+}
+const REAL_WORKSPACE = guessWorkspace()
+if (!REAL_WORKSPACE) {
+  console.error('smoke-panel 需要真实工作区：设置 DSH_MEMORY_WORKSPACE=/path/to/workspace，或把本插件放在工作区的 project/ 下')
+  process.exit(2)
+}
 
 async function mount(workspace) {
   // 每个 mount 拿一份独立的模块实例（resolveWorkspace 有模块级缓存），
@@ -394,6 +407,61 @@ const kwMiss = await call('GET', '/search?q=PMKWTOKEN42NOTHERE', null, sandboxRo
   check('线索解决：最近解决的带回来（含天数）', Array.isArray(withRecent.recent) && withRecent.recent[0]?.text === '各板块止损线怎么定' && withRecent.recent[0]?.days === 0, JSON.stringify(withRecent.recent))
 }
 
+// ---- 状态条与未完成页必须说同一个数 ----
+{
+  const st = (await call('GET', '/status')).json?.value ?? {}
+  const c = st.counts ?? {}
+  check('状态：/status 带「按件」的未完成数', Number.isFinite(Number(c.openTodosDistinct)), JSON.stringify(c.openTodosDistinct))
+  check('状态：按件不会多于按条', Number(c.openTodosDistinct) <= Number(c.openTodos), `${c.openTodosDistinct} <= ${c.openTodos}`)
+  check('状态：真工作区里确实有重复（件 < 条）', Number(c.openTodosDistinct) < Number(c.openTodos), `${c.openTodosDistinct} < ${c.openTodos}`)
+}
+
+// ---- 同一件事重抄多天：要认出是同一件 ----
+{
+  const dupA = 'PMDUP 同一件事的重复（可以删）'
+  await call('POST', '/note', { text: dupA, todo: true, date: '2026-09-03' }, sandboxRoute)
+  await call('POST', '/note', { text: dupA, todo: true, date: '2026-09-04' }, sandboxRoute)
+  const tl = (await call('GET', '/timeline?refresh=1', null, sandboxRoute)).json?.value ?? {}
+  const rows = (tl.days ?? []).flatMap((day) => (day.todos ?? []).filter((item) => String(item.text).includes('PMDUP')))
+  check('重复待办：两天的同一句都能读到', rows.length === 2, JSON.stringify(rows.map((row) => row.text).slice(0, 2)))
+  check('重复待办：给出同一个 dupKey', rows.length === 2 && rows[0].dupKey && rows[0].dupKey === rows[1].dupKey, JSON.stringify(rows.map((row) => row.dupKey)))
+  check('重复待办：dupCount 记到 2', rows.every((row) => row.dupCount === 2), JSON.stringify(rows.map((row) => row.dupCount)))
+  check('重复待办：dupDates 带两天', Array.isArray(rows[0]?.dupDates) && rows[0].dupDates.length === 2, JSON.stringify(rows[0]?.dupDates))
+
+  // 不同的事不能被并成一件
+  await call('POST', '/note', { text: '去配一把钥匙，顺便把门口的灯换成暖光', todo: true, date: '2026-09-03' }, sandboxRoute)
+  const tl2 = (await call('GET', '/timeline?refresh=1', null, sandboxRoute)).json?.value ?? {}
+  const rows2 = (tl2.days ?? []).flatMap((day) => (day.todos ?? []))
+  const dupRows = rows2.filter((item) => String(item.text).includes('PMDUP'))
+  const otherRow = rows2.find((item) => String(item.text).includes('钥匙'))
+  check('重复待办：不像的不会被并成一件', dupRows.length === 2 && otherRow && dupRows[0].dupKey !== otherRow.dupKey, JSON.stringify([dupRows.map((row) => row.dupKey), otherRow?.dupKey]))
+}
+
+// ---- 修复索引：只在库坏了的时候用（走 ctx-server /repair） ----
+{
+  // 这条会真的重建索引（20 秒上下），所以只断言参数契约：repair 标记要传给宿主
+  const repairRoute = await mount(sandbox)
+  let seen = null
+  const origFetch = globalThis.fetch
+  globalThis.fetch = async (url, opts) => {
+    if (/\/(reindex|repair)$/.test(String(url))) {
+      seen = { url: String(url), body: JSON.parse(opts?.body ?? '{}') }
+      return { ok: true, json: async () => ({ ok: true, value: { files: 3, chunks: 9 } }) }
+    }
+    return origFetch(url, opts)
+  }
+  try {
+    const plain = await call('POST', '/reindex', {}, repairRoute)
+    check('重建索引：默认走 /reindex', seen && seen.url.endsWith('/reindex') && seen.body.repair !== true, JSON.stringify(seen))
+    check('重建索引：结果带 repaired=false', plain.json?.value?.repaired === false, JSON.stringify(plain.json?.value))
+    const fixed = await call('POST', '/reindex', { repair: true }, repairRoute)
+    check('修复索引：走 /repair', seen && seen.url.endsWith('/repair'), JSON.stringify(seen))
+    check('修复索引：结果带 repaired=true', fixed.json?.value?.repaired === true, JSON.stringify(fixed.json?.value))
+  } finally {
+    globalThis.fetch = origFetch
+  }
+}
+
 // ---- 命中带「我什么时候看过它」 ----
 {
   const before = await call('GET', '/search?q=止损线&topK=6')
@@ -526,7 +594,7 @@ const usedState = await call('GET', '/state', null, sandboxRoute)
 check('/state 里读到刚打的点', Number(usedState.json?.value?.used?.['personal/index.md']?.at) > 0, JSON.stringify(usedState.json?.value?.used?.['personal/index.md'] ?? null).slice(0, 60))
 check('POST /used 缺 path 报 400', (await call('POST', '/used', {}, sandboxRoute)).status === 400)
 const usedFile = readFileSync(join(sandbox, '.dsh/personal-memory/state.json'), 'utf8')
-check('打开记录落在工作区 .dsh 里（不进笔记）', usedFile.includes('personal/index.md') && usedFile.includes('used') && !usedFile.includes('/Users/mars/sly/personal/index.md'))
+check('打开记录落在工作区 .dsh 里（不进笔记）', usedFile.includes('personal/index.md') && usedFile.includes('used') && !usedFile.startsWith(REAL_WORKSPACE))
 
 // ---- 最近召回日志带 items（面板里能点进原文） ----
 const statusNow = await call('GET', '/status', null, sandboxRoute)
@@ -763,6 +831,10 @@ check('POST /ui 非对象报 400', (await call('POST', '/ui', 'nope', sandboxRou
 await call('POST', '/ui', { todoSort: 'oldest' }, sandboxRoute)
 const sortState = await call('GET', '/state', null, sandboxRoute)
 check('POST /ui 能记住清单排序', sortState.json?.value?.ui?.todoSort === 'oldest', String(sortState.json?.value?.ui?.todoSort))
+// 排序偏好是 ui 的兄弟字段，不能落进 collapsed（真机上就这样长出一堆 collapsed.todoSort）
+check('排序偏好不混进折叠表',
+  !('todoSort' in (sortState.json?.value?.ui?.collapsed ?? {})) && !('searchSort' in (sortState.json?.value?.ui?.collapsed ?? {})),
+  JSON.stringify(Object.keys(sortState.json?.value?.ui?.collapsed ?? {})))
 await call('POST', '/ui', { todoSort: '瞎写' }, sandboxRoute)
 const sortBack = await call('GET', '/state', null, sandboxRoute)
 check('非法排序值被忽略，保留原值', sortBack.json?.value?.ui?.todoSort === 'oldest', String(sortBack.json?.value?.ui?.todoSort))

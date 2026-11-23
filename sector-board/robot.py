@@ -68,6 +68,14 @@ def now_cn():
     return dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
 
 
+def previous_weekday(day):
+    """最近一个已收盘的工作日（周一取上周五；不含节假日日历）。"""
+    day = day - dt.timedelta(days=1)
+    while day.weekday() >= 5:
+        day = day - dt.timedelta(days=1)
+    return day
+
+
 def symbol(code):
     code = str(code)
     if code.startswith(("sh", "sz", "bj")):
@@ -184,7 +192,7 @@ def build_prompt(acc, ctx, pos, q, date):
     for i, x in enumerate(ctx["leaders"][:12], 1):
         cand_lines.append(
             f"{i}. {x['code']} {x['name']}｜{x.get('industry','')}｜现价 {x.get('price')} "
-            f"今日 {((x.get('pct') or 0)*100):+.1f}% 5日 {((x.get('pct5') or 0)*100):+.1f}% "
+            f"今日 {(x.get('pct') or 0):+.1f}% 5日 {((x.get('pct5') or 0)*100):+.1f}% "
             f"1年位置 {((x.get('pos250') or 0)*100):.0f}% 5年位置 {((x.get('pos1250') or 0)*100):.0f}% "
             f"MA20 距离 {((x.get('ma20_dist') or 0)*100):+.1f}% 斜率 {((x.get('ma20_slope') or 0)*100):+.1f}% "
             f"MACD {x.get('macd_zone','')} RSI {x.get('rsi14','')} 量比 {x.get('vol_ratio','')} "
@@ -392,21 +400,23 @@ def run(dry=False, model=None, force_rules=False, force=False):
                "initial": INITIAL, "cash": INITIAL, "positions": [], "trades": [],
                "equity": [], "decisions": []}
     ctx = market_context()
-    date = ctx.get("as_of") or now_cn().date().isoformat()
+    now = now_cn()
+    today = now.date().isoformat()
+    # 账本永远按“今天”记账；dashboard.as_of 只作为分析快照日期。
+    # 如果分析快照还停留在更早的交易日，宁可跳过，也不要把今天的行情
+    # 写到旧日期上（否则会出现“11-20 的决策用了 11-23 的价格”）。
+    date = today
+    ctx_asof = str(ctx.get("as_of") or "")[:10]
+    expected = previous_weekday(now.date()).isoformat()
+    if ctx_asof and ctx_asof < expected and not force:
+        print(json.dumps({"skip": "stale-dashboard", "dashboard_as_of": ctx_asof,
+                          "expected_analysis_date": expected, "ledger_date": today},
+                         ensure_ascii=False))
+        return 0
     codes = [p["code"] for p in acc.get("positions", [])] + [x["code"] for x in ctx["leaders"][:12]]
     q = quotes(codes)
     pos = positions_with_pnl(acc, q)
 
-    now = now_cn()
-    today = now.date().isoformat()
-    try:
-        dash_age = (now.date() - dt.date.fromisoformat(str(date)[:10])).days
-    except Exception:  # noqa: BLE001
-        dash_age = None
-    if dash_age is not None and dash_age > 7 and not force:
-        print(json.dumps({"skip": "stale-dashboard", "dashboard_as_of": date, "age_days": dash_age},
-                         ensure_ascii=False))
-        return 0
     if now.weekday() >= 5 and not force:
         print(json.dumps({"skip": "weekend", "date": today}, ensure_ascii=False))
         return 0
